@@ -149,7 +149,8 @@ docs/DECISIONS.md  README.md  render.yaml
 
 ```ts
 RoomView  = { code, rev, phase: 'lobby'|'countdown'|'playing'|'result', hostId,
-              round, startsAt, endsAt, members: Member[], lastResult: Result | null }
+              round, startsAt, endsAt, soloEndsAt /* 不足 2 人在线时的提前结束时刻 */,
+              members: Member[], lastResult: Result | null }
 Member    = { id, name, role: 'player'|'spectator', slot: number|null,
               ready, online, offlineUntil: number|null, left: boolean }
 GameView  = { w, h, cells: number[] /* 每格存 owner 的 slot，空格为 -1 */, players: PState[], scores }
@@ -301,7 +302,7 @@ lobby ──房主开始（≥2 名玩家，且全部在线、已准备）──
 
 ### 6.3 客户端侧的行为
 
-- **意外断线**（关闭码不是 4001 或 4002）：显示"连接中断，正在重连…"，并按 0.5 s → 1 s → 2 s → 4 s 指数退避重连，带上 token，总时长不超过 30 秒。
+- **意外断线**（关闭码不是 4001、4002 或 4008，详见 D-22）：显示"连接中断，正在重连…"，并按 0.5 s → 1 s → 2 s → 4 s 指数退避重连，带上 token，总时长不超过 30 秒。
 - **刷新页面**：不会发送 `leave`。刷新等同于短暂断线，靠 sessionStorage 里的 token 自动恢复。
 - **被顶替**（4001）：显示"你在另一个标签页打开了这个房间"，提供两个选项：「在这里继续」会重新连接并反过来顶替对方；「以新玩家加入」会清除本页 token，然后重新加入。
 - **重连失败**（收到 `TOKEN_INVALID` 或 `ROOM_NOT_FOUND`）：清除该房间的 token，引导用户重新加入或创建新房间。
@@ -484,6 +485,12 @@ ws 基于 TCP，同一条连接上不会丢包或乱序。所以"丢弃旧 tick"
 
 **D-20 MVP 不做的内容。**
 账号、排行榜、匹配、聊天、多实例扩展、持久化、外挂检测、自定义房间设置（地图大小和时长）。
+
+**D-21 提前结算（掉线或离开导致不足 2 人）时仍按当前格数判胜负，不自动判留下的人获胜。**
+规则只有一条"格子多的人赢"，提前结算不引入第二条规则，结算页写明原因即可。这样也不会出现"故意拔网线让对方提前结束"能改变胜负的情况：掉线者的格子保留、仍参与排名（主动离开者除外，见 D-13）。
+
+**D-22 断线体验：客户端带 token 自动重连，复用当前画面；"掉线"提示延迟 1.5 秒。**
+意外断线（关闭码不是 4001/4002/4008）时，客户端保留当前画面，顶部显示"连接中断，正在重连…（第 n 次）"，按 0.5/1/2/4 s 退避重连，30 秒后放弃并给出「重新加入」。浏览器触发 `online` 事件时立即重试。其他人这边，掉线提示延迟 1.5 秒：刷新页面这种秒回的情况不弹任何提示，只有真正掉线才提示，并在对局画面顶部显示"xx 掉线，重连中 25s"和"在线玩家不足 2 人，8s 后结束本局"（服务端在 RoomView 中下发 `soloEndsAt`，倒计时以服务端为准）。
 
 ---
 

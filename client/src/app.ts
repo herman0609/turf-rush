@@ -1,10 +1,10 @@
 // 客户端总控制器：路由 → 连接 → 消息 → 视图。
 // 原则：界面只是服务端状态的投影；本地只保存身份（sessionStorage）和"我已看过的结算"这类纯展示状态。
 
-import { PROTOCOL_VERSION, type Dir } from '@turf/shared/constants';
+import { PROTOCOL_VERSION, SEAT_GRACE_MS, type Dir } from '@turf/shared/constants';
 import type { RoomView, S2C } from '@turf/shared/protocol';
 import { normalizeRoomCode } from '@turf/shared/util';
-import { clear, copyText, toast } from './dom';
+import { clear, copyText, setNetBar, toast } from './dom';
 import { Connection, wsUrl } from './net';
 import * as session from './session';
 import { Stage } from './stage';
@@ -12,6 +12,9 @@ import { ClientSync } from './sync';
 import { connectingView, homeView, joinView, lobbyView, messageView } from './views';
 
 type View = 'home' | 'join' | 'connecting' | 'lobby' | 'stage' | 'message';
+
+/** 意外断线后的重连间隔：0.5s → 1s → 2s → 4s → 4s …，总时长不超过座位保留时间 */
+const RETRY_DELAYS = [500, 1000, 2000, 4000];
 
 const KEYMAP: Record<string, Dir> = {
   ArrowUp: 'U',
@@ -29,7 +32,12 @@ export class App {
   private conn: Connection | null = null;
   private sync = new ClientSync();
   private code: string | null = null;
+  private name = '';
   private you: string | null = null;
+  private retry: { attempt: number; since: number; timer: number } | null = null;
+  /** 掉线提示延迟 1.5 秒：刷新页面这种秒回的情况不打扰其他人 */
+  private offlineToasts = new Map<string, number>();
+  private justWelcomed = false;
   private seq = 0;
   private stage: Stage | null = null;
   private raf = 0;
@@ -47,6 +55,13 @@ export class App {
     window.addEventListener('keydown', (e) => this.onKey(e));
     window.addEventListener('resize', () => {
       if (this.stage && this.sync.game) this.stage.layout(this.sync.game, true);
+    });
+    // 网络恢复时不必等退避计时，立即重连
+    window.addEventListener('online', () => {
+      if (this.retry) {
+        window.clearTimeout(this.retry.timer);
+        this.openSocket();
+      }
     });
     this.route();
   }
@@ -163,13 +178,24 @@ export class App {
 
   // ------------------------------------------------------------------ 连接
 
+  /** 进入房间：重置本地状态并建立连接（有 token 时自动作为重连） */
   private connect(code: string, name: string): void {
     this.disconnect();
     this.code = code;
+    this.name = name;
     this.sync = new ClientSync();
     this.you = null;
     this.stage = null;
     this.mount(connectingView('正在进入房间…'), 'connecting');
+    this.openSocket();
+  }
+
+  /** 建立一条新的 WebSocket。重连时复用当前画面，收到快照后整体刷新。 */
+  private openSocket(): void {
+    const code = this.code;
+    if (!code) return;
+    const name = this.name;
+    this.conn?.close();
     const conn = new Connection(wsUrl(), {
       onOpen: () => {
         const id = session.getIdentity(code);
@@ -189,8 +215,35 @@ export class App {
     const c = this.conn;
     this.conn = null;
     c?.close();
+    this.stopRetry();
+    this.offlineToasts.forEach((t) => window.clearTimeout(t));
+    this.offlineToasts.clear();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
+  }
+
+  private stopRetry(): void {
+    if (this.retry) window.clearTimeout(this.retry.timer);
+    this.retry = null;
+    setNetBar(null);
+  }
+
+  private scheduleReconnect(code: string): void {
+    const now = performance.now();
+    this.retry ??= { attempt: 0, since: now, timer: 0 };
+    const r = this.retry;
+    if (now - r.since > SEAT_GRACE_MS) {
+      this.stopRetry();
+      this.showMessage('重连失败', '30 秒内没能连上服务器，座位已经释放。网络恢复后可以重新加入。', [
+        { label: '重新加入', primary: true, onClick: () => this.connect(code, session.getNickname()) },
+        { label: '返回首页', onClick: () => this.navigate('/') },
+      ]);
+      return;
+    }
+    const delay = RETRY_DELAYS[Math.min(r.attempt, RETRY_DELAYS.length - 1)]!;
+    r.attempt++;
+    setNetBar(`连接中断，正在重连…（第 ${r.attempt} 次）`);
+    r.timer = window.setTimeout(() => this.openSocket(), delay);
   }
 
   private onMessage(conn: Connection, code: string, name: string, msg: S2C): void {
@@ -199,16 +252,32 @@ export class App {
         this.you = msg.you;
         this.seq = 0; // seq 按连接计数，服务端同样在新连接上归零
         session.setIdentity(code, { playerId: msg.you, token: msg.token });
+        if (this.retry) {
+          this.stopRetry();
+          toast('已重新连接', 'ok', 1500);
+        }
+        this.justWelcomed = true;
         return;
-      case 'snapshot':
+      case 'snapshot': {
+        const prev = this.sync.room;
         this.sync.applySnapshot(msg);
         this.resyncAt = 0;
+        if (this.justWelcomed) {
+          this.justWelcomed = false;
+          this.greet(msg.room);
+        } else if (prev) this.announce(prev, msg.room);
         this.render();
         if (this.stage && this.sync.game) this.stage.onTick(this.sync.game.players, performance.now());
         return;
-      case 'room':
-        if (this.sync.applyRoom(msg)) this.render();
+      }
+      case 'room': {
+        const prev = this.sync.room;
+        if (this.sync.applyRoom(msg)) {
+          if (prev) this.announce(prev, msg.room);
+          this.render();
+        }
         return;
+      }
       case 'tick': {
         const r = this.sync.applyTick(msg);
         if (r === 'gap' || r === 'mismatch') this.requestResync(conn);
@@ -263,14 +332,23 @@ export class App {
   private onClose(code: string, wsCode: number, reason: string): void {
     this.conn = null;
     if (wsCode === 4001) {
-      this.showMessage('你在另一个页面打开了这个房间', '同一个座位只能在一个页面里玩。', [
+      this.stopRetry();
+      this.showMessage('你在另一个页面打开了这个房间', '同一个座位同时只能在一个页面里玩（复制标签页会带上同一个身份）。', [
         { label: '在这里继续', primary: true, onClick: () => this.connect(code, session.getNickname()) },
+        {
+          label: '以新玩家加入',
+          onClick: () => {
+            session.clearIdentity(code);
+            this.connect(code, session.getNickname());
+          },
+        },
         { label: '返回首页', onClick: () => this.navigate('/') },
       ]);
       return;
     }
     if (wsCode === 4002) return; // 主动离开
     if (wsCode === 1012 || reason === 'room_expired') {
+      this.stopRetry();
       session.clearIdentity(code);
       this.showMessage(
         wsCode === 1012 ? '服务器刚刚重启' : '房间已失效',
@@ -282,13 +360,67 @@ export class App {
       );
       return;
     }
-    this.showMessage('连接已断开', wsCode === 4008 ? `连接因异常被服务器断开（${reason}）。` : '网络连接中断了。', [
+    // 意外断线：已经在房间里，就带着 token 自动重连；否则（例如首次就连不上）让用户手动重试
+    if (wsCode !== 4008 && this.sync.room && session.getIdentity(code)) {
+      this.scheduleReconnect(code);
+      return;
+    }
+    this.stopRetry();
+    this.showMessage('连接已断开', wsCode === 4008 ? `连接因异常被服务器断开（${reason}）。` : '没能连上服务器，请检查网络后重试。', [
       { label: '重新连接', primary: true, onClick: () => this.connect(code, session.getNickname()) },
       { label: '返回首页', onClick: () => this.navigate('/') },
     ]);
   }
 
   // ------------------------------------------------------------------ 视图投影
+
+  /** 刚进入（或重连进入）房间时的说明 */
+  private greet(room: RoomView): void {
+    const me = room.members.find((m) => m.id === this.you);
+    if (me?.role !== 'spectator') return;
+    if (room.phase === 'countdown' || room.phase === 'playing') toast('对局进行中，你正在观战，下一局自动加入', 'info', 4000);
+    else toast('房间已满 4 人，你正在观战，有空位时自动加入', 'info', 4000);
+  }
+
+  /** 对比前后两个房间状态，提示成员变化 */
+  private announce(prev: RoomView, next: RoomView): void {
+    if (prev.code !== next.code) return;
+    const before = new Map(prev.members.map((m) => [m.id, m]));
+    const after = new Set(next.members.map((m) => m.id));
+    for (const m of next.members) {
+      const p = before.get(m.id);
+      if (m.id === this.you) {
+        if (p?.role === 'spectator' && m.role === 'player') toast('有空位了，你已加入下一局', 'ok');
+        continue;
+      }
+      if (!p) toast(m.role === 'spectator' ? `${m.name} 进来观战了` : `${m.name} 加入了房间`);
+      else if (!p.left && m.left) toast(m.online || p.online ? `${m.name} 离开了房间` : `${m.name} 未能重连，已离开本局`, 'warn');
+      else if (p.online && !m.online && !m.left) {
+        const name = m.name;
+        this.offlineToasts.set(
+          m.id,
+          window.setTimeout(() => {
+            this.offlineToasts.delete(m.id);
+            toast(`${name} 掉线了，等待重连…`, 'warn');
+          }, 1500),
+        );
+      } else if (!p.online && m.online) {
+        const pending = this.offlineToasts.get(m.id);
+        if (pending !== undefined) {
+          window.clearTimeout(pending);
+          this.offlineToasts.delete(m.id);
+        } else toast(`${m.name} 回来了`, 'ok');
+      }
+    }
+    for (const p of prev.members) {
+      if (after.has(p.id) || p.left || p.id === this.you) continue;
+      toast(p.online ? `${p.name} 离开了房间` : `${p.name} 未能重连，已移出房间`, 'warn');
+    }
+    if (prev.hostId !== next.hostId && next.hostId) {
+      const host = next.members.find((m) => m.id === next.hostId);
+      toast(next.hostId === this.you ? '你现在是房主' : `${host?.name ?? '?'} 成为了房主`, 'info');
+    }
+  }
 
   private me() {
     return this.sync.room?.members.find((m) => m.id === this.you);

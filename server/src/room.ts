@@ -327,10 +327,14 @@ export class Room {
       // 只剩 1 名在线玩家持续一段时间：提前结束
       const online = this.activeParticipants().filter((m) => m.online).length;
       if (online <= 1) {
-        this.soloSince ??= now;
-        if (now - this.soloSince >= SOLO_GRACE_MS) this.finish('opponents_offline');
-      } else {
+        if (this.soloSince === null) {
+          this.soloSince = now;
+          this.log('solo_start', { room: this.code });
+          this.broadcastRoom(); // 让所有人看到"10 秒后结束本局"
+        } else if (now - this.soloSince >= SOLO_GRACE_MS) this.finish('opponents_offline');
+      } else if (this.soloSince !== null) {
         this.soloSince = null;
+        this.broadcastRoom();
       }
     }
   }
@@ -564,6 +568,7 @@ export class Room {
       hostId: this.hostId,
       startsAt: this.startsAt,
       endsAt: this.endsAt,
+      soloEndsAt: this.soloSince !== null ? this.soloSince + SOLO_GRACE_MS : null,
       members,
       lastResult: this.lastResult,
     };

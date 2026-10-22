@@ -583,12 +583,56 @@ input {
 }
 
 .banner {
-  padding: 8px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.pill {
+  padding: 6px 14px;
   border-radius: 999px;
-  background: #ede9fe;
-  color: #5b21b6;
   font-weight: 600;
   font-size: 14px;
+  animation: rise 0.2s ease-out;
+}
+
+.pill.info {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.pill.warn {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.netbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 90;
+  padding: 8px 16px;
+  text-align: center;
+  background: #9a3412;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.2);
+}
+
+.netbar::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  vertical-align: -1px;
+  animation: spin 0.8s linear infinite;
 }
 
 .board-wrap {
@@ -643,8 +687,10 @@ input {
 /* ---------------- 结算 ---------------- */
 
 .result {
-  position: absolute;
+  /* 全屏覆盖：窄屏下棋盘很矮，限制在棋盘内会把按钮挤出可视区 */
+  position: fixed;
   inset: 0;
+  z-index: 50;
   display: grid;
   place-items: center;
   background: rgba(244, 246, 251, 0.72);
@@ -735,9 +781,11 @@ input {
 /* ---------------- 提示 ---------------- */
 
 .toasts {
+  /* 放在底部，避免挡住顶部比分条和计时 */
   position: fixed;
   left: 50%;
-  top: 16px;
+  bottom: 20px;
+  align-items: center;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
@@ -768,7 +816,7 @@ input {
 
 .toast.out {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: translateY(6px);
 }
 
 .spinner {

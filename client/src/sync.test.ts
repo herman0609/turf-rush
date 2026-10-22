@@ -11,6 +11,7 @@ const room = (rev: number): RoomView => ({
   hostId: null,
   startsAt: 0,
   endsAt: 0,
+  soloEndsAt: null,
   members: [],
   lastResult: null,
 });

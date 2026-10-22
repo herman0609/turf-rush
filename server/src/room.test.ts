@@ -262,3 +262,118 @@ describe('断线、重连、离开', () => {
     expect(room.emptySince).toBe(now);
   });
 });
+
+describe('M2 生命周期细节', () => {
+  it('大厅中房主离开：立即移交给下一位玩家', () => {
+    const a = join('A');
+    const b = join('B');
+    join('C');
+    room.handle(a.m, { t: 'leave' }, now);
+    expect(room.hostId).toBe(b.m.id);
+    expect(b.link.last('room')!.room.hostId).toBe(b.m.id);
+  });
+
+  it('房主移交优先给玩家而不是观战者', () => {
+    const a = join('A');
+    const b = join('B');
+    room.handle(b.m, { t: 'ready', ready: true }, now);
+    room.handle(a.m, { t: 'start' }, now);
+    const s = join('S'); // 倒计时中加入 → 观战
+    expect(s.m.role).toBe('spectator');
+    advance(COUNTDOWN_MS + TICK_MS);
+    // 房主掉线超时被移出：本局 B 一人，立即结算；房主给 B 而不是更早在线的观战者
+    room.disconnect(a.m, a.link, now);
+    advance(SEAT_GRACE_MS + TICK_MS);
+    expect(room.hostId).toBe(b.m.id);
+  });
+
+  it('掉线的房主在宽限期内重连：仍是房主', () => {
+    const a = join('A');
+    join('B');
+    room.disconnect(a.m, a.link, now);
+    advance(5000);
+    const again = join('A', a.link.of('welcome')[0]!.token);
+    expect(again.m.id).toBe(a.m.id);
+    expect(room.hostId).toBe(a.m.id);
+    expect(again.m.online).toBe(true);
+  });
+
+  it('离线玩家在大厅里会阻止开始', () => {
+    const a = join('A');
+    const b = join('B');
+    room.handle(b.m, { t: 'ready', ready: true }, now);
+    room.disconnect(b.m, b.link, now);
+    room.handle(a.m, { t: 'start' }, now);
+    expect(a.link.last('error')!.msg).toBe('等待 B 重连');
+  });
+
+  it('对局中掉线的玩家角色被冻结，重连后解冻并收到当前 tick 的快照', () => {
+    const { a, b } = startTwo();
+    advance(COUNTDOWN_MS + TICK_MS);
+    room.disconnect(b.m, b.link, now);
+    advance(10 * TICK_MS);
+    const pb = room.game!.players.find((p) => p.id === b.m.id)!;
+    expect(pb.frozen).toBe(true);
+    const frozenAt = [pb.x, pb.y];
+    advance(10 * TICK_MS);
+    const pb2 = room.game!.players.find((p) => p.id === b.m.id)!;
+    expect([pb2.x, pb2.y]).toEqual(frozenAt);
+    const again = join('B', b.link.of('welcome')[0]!.token);
+    expect(again.link.of('snapshot')[0]!.tick).toBe(room.game!.tick);
+    advance(TICK_MS);
+    expect(room.game!.players.find((p) => p.id === b.m.id)!.frozen).toBe(false);
+    void a;
+  });
+
+  it('单人检测开始与取消都会广播 soloEndsAt', () => {
+    const { a, b } = startTwo();
+    advance(COUNTDOWN_MS + TICK_MS);
+    room.disconnect(b.m, b.link, now);
+    advance(TICK_MS);
+    const soloEndsAt = a.link.last('room')!.room.soloEndsAt;
+    expect(soloEndsAt).not.toBeNull();
+    join('B', b.link.of('welcome')[0]!.token);
+    advance(TICK_MS);
+    expect(a.link.last('room')!.room.soloEndsAt).toBeNull();
+    expect(room.phase).toBe('playing');
+  });
+
+  it('对局中离开的玩家：格子保留在榜单上，下一局开始前被清理', () => {
+    const a = join('A');
+    const b = join('B');
+    const c = join('C');
+    room.handle(b.m, { t: 'ready', ready: true }, now);
+    room.handle(c.m, { t: 'ready', ready: true }, now);
+    room.handle(a.m, { t: 'start' }, now);
+    advance(COUNTDOWN_MS + 10 * TICK_MS);
+    room.handle(c.m, { t: 'leave' }, now);
+    expect(room.phase).toBe('playing'); // 还剩 2 人，继续
+    expect(room.view().members.find((m) => m.id === c.m.id)!.left).toBe(true);
+    advance(MATCH_TICKS * TICK_MS);
+    expect(room.lastResult!.ranking.find((r) => r.id === c.m.id)!.left).toBe(true);
+    expect(room.lastResult!.winners).not.toContain(c.m.id);
+    room.handle(a.m, { t: 'rematch' }, now);
+    expect(room.view().members.map((m) => m.id)).not.toContain(c.m.id);
+  });
+
+  it('已离开的玩家不能用旧 token 重回本局', () => {
+    const a = join('A');
+    const b = join('B');
+    join('C');
+    room.handle(b.m, { t: 'ready', ready: true }, now);
+    room.handle(a.m, { t: 'start' }, now);
+    expect(room.phase).toBe('lobby'); // C 未准备
+    const token = b.link.of('welcome')[0]!.token;
+    room.handle(b.m, { t: 'leave' }, now);
+    const link = new FakeLink();
+    expect(room.join(link, { t: 'join', v: 1, code: 'ABCDE', name: 'B', token }, now)).toBeNull();
+    expect(link.last('error')!.code).toBe('TOKEN_INVALID');
+  });
+
+  it('观战席也满时返回 ROOM_FULL', () => {
+    for (let i = 0; i < 4 + 8; i++) join(`P${i}`);
+    const link = new FakeLink();
+    expect(room.join(link, { t: 'join', v: 1, code: 'ABCDE', name: 'late' }, now)).toBeNull();
+    expect(link.last('error')!.code).toBe('ROOM_FULL');
+  });
+});

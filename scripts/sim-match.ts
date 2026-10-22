@@ -150,7 +150,16 @@ function drive(bot: Bot, seed: number): () => void {
   return () => clearInterval(timer);
 }
 
-async function playRound(a: Bot, b: Bot, round: number, cheat: boolean): Promise<ResultView> {
+interface RoundOpts {
+  code: string;
+  /** 第 1 局：作弊/重复输入检查 */
+  cheat?: boolean;
+  /** 第 2 局：乙断线后用 token 重连；丙中途加入观战 */
+  lifecycle?: Bot;
+}
+
+async function playRound(a: Bot, b: Bot, round: number, opts: RoundOpts): Promise<ResultView> {
+  const { cheat = false, lifecycle: c } = opts;
   await Promise.all([a, b].map((x) => x.waitFor(`第 ${round} 局倒计时`, () => x.phase === 'countdown' && x.sync.round === round)));
   log(`第 ${round} 局：3-2-1 倒计时`);
   await Promise.all([a, b].map((x) => x.waitFor('开始', () => x.phase === 'playing', 6000)));
@@ -177,15 +186,43 @@ async function playRound(a: Bot, b: Bot, round: number, cheat: boolean): Promise
     log(`作弊检查：${b.errors.length - errorsBefore} 条非法消息被拒绝，${b.dropped} 条重复/过期输入被丢弃，连接仍然保持`);
   }
 
+  if (c) {
+    // 中途加入：以观战身份进入，能看到当前对局
+    await sleep(300);
+    await c.connect(opts.code);
+    await c.waitFor('丙进入观战', () => c.phase === 'playing' && !!c.member());
+    assert(c.member()!.role === 'spectator', '对局中加入的人应是观战者');
+    assert(c.sync.game !== null && c.sync.game.players.every((p) => p.id !== c.you), '观战者能看到对局但不在场上');
+    log('丙在对局中加入：以观战身份进入，收到当前对局的全量快照');
+
+    // 掉线：直接断开 TCP，不发 leave
+    const bid = b.you;
+    b.ws.terminate();
+    await a.waitFor('甲看到乙掉线', () => a.member(bid)?.online === false && a.member(bid)?.offlineUntil !== null);
+    const left = Math.round((a.member(bid)!.offlineUntil! - Date.now()) / 1000);
+    await a.waitFor('乙的角色被冻结', () => a.sync.game?.players.find((p) => p.id === bid)?.frozen === true, 2000);
+    log(`乙掉线：甲看到「机器人乙 掉线，重连中 ${left}s」，乙的角色原地冻结`);
+
+    // 重连：同一个 token 建立新连接，恢复同一个座位
+    await sleep(1200);
+    await b.connect(opts.code, b.token);
+    await b.waitFor('乙重连成功', () => b.you === bid && b.phase === 'playing' && b.member()?.online === true);
+    await a.waitFor('甲看到乙回来', () => a.member(bid)?.online === true);
+    await a.waitFor('乙的角色解冻', () => a.sync.game?.players.find((p) => p.id === bid)?.frozen === false, 2000);
+    log('乙用 token 重连：恢复原座位（同一 playerId），收到全量快照，继续操作');
+  }
+
   const timeout = (MATCH_SECONDS + 15) * 1000;
-  await Promise.all([a, b].map((x) => x.waitFor(`第 ${round} 局结算`, () => x.phase === 'result' && x.result?.round === round, timeout)));
+  const everyone = c ? [a, b, c] : [a, b];
+  await Promise.all(everyone.map((x) => x.waitFor(`第 ${round} 局结算`, () => x.phase === 'result' && x.result?.round === round, timeout)));
   stops.forEach((s) => s());
 
   const ra = a.result!;
   const rb = b.result!;
   assert(JSON.stringify(ra) === JSON.stringify(rb), '两端的结算结果必须完全一致');
   assert(ra.reason === 'time', `第 ${round} 局应因时间结束，实际是 ${ra.reason}`);
-  for (const x of [a, b]) {
+  for (const x of everyone) {
+    assert(JSON.stringify(x.result) === JSON.stringify(ra), `${x.name}：结算结果与其他人不一致`);
     assert(x.sync.localChecksum() === ra.sum, `${x.name}：增量重建的棋盘与服务端终局校验和不一致`);
     assert(x.sync.stats.mismatches === 0, `${x.name}：出现 ${x.sync.stats.mismatches} 次校验和不一致`);
   }
@@ -195,7 +232,10 @@ async function playRound(a: Bot, b: Bot, round: number, cheat: boolean): Promise
     `第 ${round} 局结算：${ra.ranking.map((r) => `${r.name} ${r.score} 格`).join(' vs ')}，` +
       (winners.length > 1 ? `平局（${winners.join('、')}）` : `${winners[0]} 获胜`),
   );
-  log(`一致性：双方结算相同，本地重建校验和 = 服务端 ${ra.sum.toString(16)}，共涂 ${total} 格，tick 缺口 a=${a.sync.stats.gaps} b=${b.sync.stats.gaps}`);
+  log(
+    `一致性：${everyone.length} 端结算相同，本地重建校验和 = 服务端 ${ra.sum.toString(16)}，共涂 ${total} 格，` +
+      `tick 缺口 ${everyone.map((x) => `${x.name.slice(-1)}=${x.sync.stats.gaps}`).join(' ')}`,
+  );
   return ra;
 }
 
@@ -214,6 +254,7 @@ async function main(): Promise<void> {
 
   const a = new Bot('机器人甲', wsUrl);
   const b = new Bot('机器人乙', wsUrl);
+  const c = new Bot('机器人丙', wsUrl);
   try {
     const res = await fetch(`${base}/api/rooms`, { method: 'POST' });
     assert(res.status === 201, `建房失败：HTTP ${res.status}`);
@@ -245,7 +286,7 @@ async function main(): Promise<void> {
     a.send({ t: 'start' });
 
     for (let round = 1; round <= ROUNDS; round++) {
-      await playRound(a, b, round, round === 1);
+      await playRound(a, b, round, { code, cheat: round === 1, lifecycle: round === 2 ? c : undefined });
       if (round < ROUNDS) {
         b.send({ t: 'rematch' });
         b.send({ t: 'rematch' }); // 重复点击无害
@@ -257,14 +298,24 @@ async function main(): Promise<void> {
       }
     }
 
+    if (ROUNDS >= 2) {
+      // 观战者在下一局补位成为玩家
+      b.send({ t: 'rematch' });
+      await c.waitFor('丙补位成为玩家', () => c.phase === 'lobby' && c.member()?.role === 'player');
+      assert(c.member()!.slot !== null, '补位后应分配颜色座位');
+      log('回到大厅：观战的丙自动补位成为玩家（3/4）');
+    }
+
     // 主动离开：房主移交
     a.send({ t: 'leave' });
     await b.waitFor('房主移交给乙', () => b.sync.room?.hostId === b.you);
-    log('甲离开房间：房主移交给乙');
+    await b.waitFor('甲已移出房间', () => !b.sync.room?.members.some((m) => m.id === a.you));
+    log('甲主动离开：立即移出房间，房主移交给乙');
     log('✅ 回归测试通过');
   } finally {
     a.close();
     b.close();
+    if (c.ws) c.close();
     await app?.shutdown();
   }
 }

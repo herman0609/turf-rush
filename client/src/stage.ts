@@ -22,8 +22,8 @@ export interface Frame {
 
 const REASON_TEXT = {
   time: '时间到',
-  opponents_offline: '其他玩家掉线超过 10 秒，本局提前结束',
-  opponents_left: '其他玩家离开了房间，本局提前结束',
+  opponents_offline: '在线玩家不足 2 人超过 10 秒，本局提前结束，按当前格数结算',
+  opponents_left: '有玩家离开，场上不足 2 人，本局提前结束，按当前格数结算',
 } as const;
 
 export class Stage {
@@ -120,7 +120,7 @@ export class Stage {
       if (ct) this.countdownEl.classList.add('pop');
     }
 
-    this.updateHud(room, game, you);
+    this.updateHud(room, game, you, serverNow);
 
     // 冲刺状态
     const me = game.players.find((p) => p.id === you);
@@ -131,10 +131,29 @@ export class Stage {
     } else if (this.dashEl.textContent !== '') this.dashEl.textContent = '';
   }
 
-  private updateHud(room: RoomView, game: ClientGame, you: string | null): void {
+  private updateHud(room: RoomView, game: ClientGame, you: string | null, serverNow: number): void {
     const names = new Map(room.members.map((m) => [m.id, m]));
     const spectating = !game.players.some((p) => p.id === you);
-    const key = JSON.stringify([game.scores, game.players.map((p) => [p.id, names.get(p.id)?.online, names.get(p.id)?.left]), spectating]);
+    const secs = (until: number) => Math.max(0, Math.ceil((until - serverNow) / 1000));
+
+    // 状态提示：观战、谁掉线了（座位还保留几秒）、在线人数不足时多久后结束
+    const notes: { text: string; kind: 'info' | 'warn' }[] = [];
+    if (spectating && (room.phase === 'countdown' || room.phase === 'playing')) {
+      notes.push({ text: '观战中 · 本局结束后回到大厅即可加入下一局', kind: 'info' });
+    }
+    if (room.phase === 'countdown' || room.phase === 'playing') {
+      for (const p of game.players) {
+        const m = names.get(p.id);
+        if (m && !m.online && !m.left && m.offlineUntil !== null) {
+          notes.push({ text: `${m.name} 掉线，重连中 ${secs(m.offlineUntil)}s`, kind: 'warn' });
+        }
+      }
+    }
+    if (room.phase === 'playing' && room.soloEndsAt !== null) {
+      notes.push({ text: `在线玩家不足 2 人，${secs(room.soloEndsAt)}s 后结束本局`, kind: 'warn' });
+    }
+
+    const key = JSON.stringify([game.scores, game.players.map((p) => [p.id, names.get(p.id)?.online, names.get(p.id)?.left]), notes]);
     if (key === this.hudKey) return;
     this.hudKey = key;
 
@@ -159,8 +178,8 @@ export class Stage {
         h('span', { style: { width: `${((game.scores[p.slot] ?? 0) / total) * 100}%`, background: PALETTE[p.slot]!.color } }),
       ),
     );
-    this.bannerEl.textContent = spectating ? '观战中 · 下一局开始前回到大厅即可加入' : '';
-    this.bannerEl.classList.toggle('hidden', !spectating);
+    this.bannerEl.replaceChildren(...notes.map((n) => h('span', { class: `pill ${n.kind}` }, n.text)));
+    this.bannerEl.classList.toggle('hidden', notes.length === 0);
   }
 
   hideResult(): void {

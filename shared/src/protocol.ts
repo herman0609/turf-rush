@@ -95,6 +95,8 @@ export interface RoomView {
   hostId: string | null;
   startsAt: number | null;
   endsAt: number | null;
+  /** 对局中在线玩家不足 2 人时：到这个服务端时间点仍未恢复就结束本局 */
+  soloEndsAt: number | null;
   members: MemberView[];
   lastResult: ResultView | null;
 }

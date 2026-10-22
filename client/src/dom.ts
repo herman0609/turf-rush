@@ -51,6 +51,22 @@ export function toast(text: string, kind: 'info' | 'warn' | 'ok' = 'info', ms = 
   }, ms);
 }
 
+let netBar: HTMLElement | null = null;
+
+/** 顶部网络状态条：断线重连时显示，不打断当前画面 */
+export function setNetBar(text: string | null): void {
+  if (text === null) {
+    netBar?.remove();
+    netBar = null;
+    return;
+  }
+  if (!netBar) {
+    netBar = h('div', { class: 'netbar', role: 'status', 'aria-live': 'polite' });
+    document.body.append(netBar);
+  }
+  netBar.textContent = text;
+}
+
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
