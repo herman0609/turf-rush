@@ -65,6 +65,9 @@ export function createApp(opts: AppOptions = {}): App {
   const staticDir = opts.staticDir && existsSync(opts.staticDir) ? opts.staticDir : null;
   const serveStatic = staticDir
     ? sirv(staticDir, {
+        // 生产环境启动时缓存文件元数据（每次部署都是新进程）；本地开发时每次请求重新读取，
+        // 否则"服务不停、只重新构建"时 ETag 不变，浏览器会一直拿 304 用旧页面
+        dev: process.env.NODE_ENV !== 'production',
         etag: true,
         setHeaders: (res, pathname) => {
           res.setHeader(

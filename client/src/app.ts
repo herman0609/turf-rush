@@ -4,6 +4,7 @@
 import { PROTOCOL_VERSION, SEAT_GRACE_MS, type Dir } from '@turf/shared/constants';
 import type { RoomView, S2C } from '@turf/shared/protocol';
 import { normalizeRoomCode } from '@turf/shared/util';
+import { installAudioUnlock, sfx } from './audio';
 import { clear, copyText, setNetBar, toast } from './dom';
 import { Connection, wsUrl } from './net';
 import * as session from './session';
@@ -53,6 +54,7 @@ export class App {
   start(): void {
     window.addEventListener('popstate', () => this.route());
     window.addEventListener('keydown', (e) => this.onKey(e));
+    installAudioUnlock();
     window.addEventListener('resize', () => {
       if (this.stage && this.sync.game) this.stage.layout(this.sync.game, true);
     });
@@ -267,7 +269,7 @@ export class App {
           this.greet(msg.room);
         } else if (prev) this.announce(prev, msg.room);
         this.render();
-        if (this.stage && this.sync.game) this.stage.onTick(this.sync.game.players, performance.now());
+        if (this.stage && this.sync.game) this.stage.onSnapshot(this.sync.game, this.sync.round, performance.now());
         return;
       }
       case 'room': {
@@ -281,7 +283,7 @@ export class App {
       case 'tick': {
         const r = this.sync.applyTick(msg);
         if (r === 'gap' || r === 'mismatch') this.requestResync(conn);
-        if ((r === 'ok' || r === 'mismatch') && this.stage) this.stage.onTick(msg.players, performance.now());
+        if ((r === 'ok' || r === 'mismatch') && this.stage && this.sync.game) this.stage.onTick(this.sync.game, this.sync.round, performance.now());
         return;
       }
       case 'error':
@@ -393,7 +395,10 @@ export class App {
         if (p?.role === 'spectator' && m.role === 'player') toast('有空位了，你已加入下一局', 'ok');
         continue;
       }
-      if (!p) toast(m.role === 'spectator' ? `${m.name} 进来观战了` : `${m.name} 加入了房间`);
+      if (!p) {
+        toast(m.role === 'spectator' ? `${m.name} 进来观战了` : `${m.name} 加入了房间`);
+        sfx.join();
+      }
       else if (!p.left && m.left) toast(m.online || p.online ? `${m.name} 离开了房间` : `${m.name} 未能重连，已离开本局`, 'warn');
       else if (p.online && !m.online && !m.left) {
         const name = m.name;
@@ -488,8 +493,14 @@ export class App {
         you: this.you,
         inviteUrl,
         serverNow: this.conn?.serverNow() ?? Date.now(),
-        onReady: (ready) => this.conn?.send({ t: 'ready', ready }),
-        onStart: () => this.conn?.send({ t: 'start' }),
+        onReady: (ready) => {
+          sfx.ui();
+          this.conn?.send({ t: 'ready', ready });
+        },
+        onStart: () => {
+          sfx.ui();
+          this.conn?.send({ t: 'start' });
+        },
         onLeave: () => this.leave(),
         onCopy: async () => {
           const ok = await copyText(inviteUrl);
@@ -537,6 +548,13 @@ export class App {
   // ------------------------------------------------------------------ 输入
 
   private onKey(e: KeyboardEvent): void {
+    // M：任意页面切换静音（输入框里打字时除外）
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    if (e.code === 'KeyM' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      sfx.toggle();
+      toast(sfx.muted ? '已静音' : '音效已打开', 'info', 1200);
+      return;
+    }
     if (this.view !== 'stage') return;
     const room = this.sync.room;
     if (!room || (room.phase !== 'countdown' && room.phase !== 'playing')) return;
@@ -545,8 +563,15 @@ export class App {
     if (!dir && !dash) return;
     e.preventDefault();
     if (e.repeat) return;
-    if (!this.sync.game?.players.some((p) => p.id === this.you)) return;
-    if (dir) this.conn?.send({ t: 'input', seq: ++this.seq, dir });
-    else this.conn?.send({ t: 'input', seq: ++this.seq, dash: true });
+    const mine = this.sync.game?.players.find((p) => p.id === this.you);
+    if (!mine) return;
+    if (dir) {
+      this.conn?.send({ t: 'input', seq: ++this.seq, dir });
+      if (dir !== mine.dir || !mine.moving) sfx.turn();
+    } else {
+      this.conn?.send({ t: 'input', seq: ++this.seq, dash: true });
+      // 本地看冷却已好、且正在对局中：立即给声音反馈，最终以服务端为准
+      if (room.phase === 'playing' && mine.cdLeft === 0 && mine.dashLeft === 0) this.stage?.noteLocalDash(performance.now());
+    }
   }
 }

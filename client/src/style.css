@@ -901,3 +901,184 @@ input {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ================= M3 游戏感 ================= */
+
+.card {
+  position: relative;
+}
+
+.card-corner {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+
+.hud-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mute-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: transform 0.15s, color 0.15s;
+}
+
+.mute-btn:hover {
+  transform: translateY(-1px);
+}
+
+.mute-btn:focus-visible {
+  outline: 3px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.mute-btn.off {
+  color: var(--ink-3);
+}
+
+/* 计时：最后 10 秒每秒弹一下（由 JS 在秒数变化时重新触发） */
+.timer.urgent {
+  animation: none;
+}
+
+.timer.beat {
+  animation: beat 0.45s cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+
+@keyframes beat {
+  0% {
+    transform: scale(1.35);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 最后 10 秒：棋盘外圈红色呼吸光 */
+.stage.final .board-wrap {
+  animation: final-glow 1s ease-in-out infinite;
+}
+
+@keyframes final-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(213, 94, 0, 0.35), var(--shadow);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(213, 94, 0, 0.7), 0 0 36px rgba(213, 94, 0, 0.35);
+  }
+}
+
+.countdown.small {
+  font-size: clamp(44px, 9vw, 104px);
+}
+
+/* 反超 / 最后 10 秒 浮动提示 */
+.callout {
+  position: absolute;
+  left: 50%;
+  top: 14%;
+  transform: translateX(-50%);
+  padding: 10px 22px;
+  border-radius: 999px;
+  font-size: clamp(18px, 3vw, 28px);
+  font-weight: 900;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  color: #fff;
+  background: var(--ink);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25);
+}
+
+.callout.good {
+  background: #009e73;
+}
+
+.callout.bad {
+  background: #d55e00;
+}
+
+.callout.info {
+  background: #5b21b6;
+}
+
+.callout.final {
+  background: #b91c1c;
+}
+
+.callout.show {
+  animation: callout 1.5s cubic-bezier(0.2, 1.3, 0.4, 1) both;
+}
+
+@keyframes callout {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 12px) scale(0.6);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1.08);
+  }
+  25% {
+    transform: translate(-50%, 0) scale(1);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(1);
+  }
+}
+
+/* 结算：按名次依次入场，冠军金色 */
+.rank-row {
+  animation: rise 0.35s cubic-bezier(0.2, 1.2, 0.4, 1) both;
+}
+
+.rank-row.win .rank-no {
+  color: #b45309;
+  font-size: 13px;
+}
+
+.result-card.won,
+.result-card.tie {
+  background: linear-gradient(180deg, #fffbeb 0, #fff 120px);
+}
+
+.result-card.won .result-title {
+  color: var(--brand);
+  animation: pop 0.6s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+
+.result-card.lost .result-title {
+  color: var(--ink-2);
+}
+
+.confetti {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 70;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage.final .board-wrap {
+    animation: none;
+    box-shadow: 0 0 0 4px rgba(213, 94, 0, 0.6), var(--shadow);
+  }
+}

@@ -1,7 +1,9 @@
 // Canvas 2D 棋盘渲染。逻辑位置按格跳变，画面在"上一格 → 当前格"之间补间，转向不会突兀折线。
+// 特效（染色弹出、粒子、冲刺拖影）只存在于渲染层，不影响任何游戏状态。
 
-import { PALETTE, type Shape } from '@turf/shared/constants';
+import { DASH_COOLDOWN_TICKS, PALETTE, type Shape } from '@turf/shared/constants';
 import type { PState } from '@turf/shared/protocol';
+import { REDUCED_MOTION } from './fx';
 import type { ClientGame } from './sync';
 
 interface Tween {
@@ -20,6 +22,28 @@ export interface PlayerLabel {
   left: boolean;
 }
 
+export interface DrawOpts {
+  /** 0..1：在自己身上画"你在这里"脉冲光圈的强度（倒计时和开局时） */
+  highlightYou: number;
+}
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  max: number;
+  size: number;
+  color: string;
+}
+
+interface Ghost {
+  x: number;
+  y: number;
+  t: number;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const n = parseInt(hex.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
@@ -33,6 +57,13 @@ function mix(hex: string, withWhite: number): string {
 
 /** 地块用浅色，角色用原色：既明亮，又能一眼分清"人"和"地" */
 export const CELL_TINT = PALETTE.map((p) => mix(p.color, 0.45));
+
+const POP_MS = 220;
+
+/** 与 docs/DECISIONS.md 第 1 节的表格一致 */
+const PALETTE_TEXTURE = ['dots', 'diagonal', 'grid', 'hstripes'] as const;
+const GHOST_MS = 160;
+const MAX_PARTICLES = 320;
 
 export function traceShape(ctx: CanvasRenderingContext2D, shape: Shape, cx: number, cy: number, r: number): void {
   ctx.beginPath();
@@ -69,6 +100,13 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath();
 }
 
+/** easeOutBack：先冲过头一点再回弹，染色时有"啪"的一下 */
+function easeOutBack(k: number): number {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2);
+}
+
 export class BoardRenderer {
   readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -77,6 +115,11 @@ export class BoardRenderer {
   private gh = 20;
   private dpr = 1;
   private tweens = new Map<string, Tween>();
+  private paintedAt = new Float64Array(0);
+  private particles: Particle[] = [];
+  private ghosts = new Map<string, Ghost[]>();
+  private lastDraw = 0;
+  private patterns: (CanvasPattern | null)[] = [];
 
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -85,6 +128,7 @@ export class BoardRenderer {
   }
 
   resize(maxW: number, maxH: number, gw: number, gh: number): void {
+    if (gw !== this.gw || gh !== this.gh || this.paintedAt.length !== gw * gh) this.paintedAt = new Float64Array(gw * gh);
     this.gw = gw;
     this.gh = gh;
     this.cell = Math.max(8, Math.floor(Math.min(maxW / gw, maxH / gh)));
@@ -95,6 +139,60 @@ export class BoardRenderer {
     this.canvas.style.height = `${cssH}px`;
     this.canvas.width = Math.round(cssW * this.dpr);
     this.canvas.height = Math.round(cssH * this.dpr);
+    this.buildPatterns();
+  }
+
+  /**
+   * 地块纹理：颜色之外的第二重编码（色盲友好）。
+   * 0 圆点 · 1 斜纹 · 2 网格 · 3 横纹。贴片边长等于一格，所以纹理与格子对齐、跨格连续。
+   */
+  private buildPatterns(): void {
+    const px = Math.max(4, Math.round(this.cell * this.dpr));
+    this.patterns = PALETTE.map((pal, slot) => {
+      const tile = document.createElement('canvas');
+      tile.width = px;
+      tile.height = px;
+      const t = tile.getContext('2d');
+      if (!t) return null;
+      t.strokeStyle = pal.color;
+      t.fillStyle = pal.color;
+      t.globalAlpha = 0.42;
+      t.lineWidth = Math.max(1, px * 0.08);
+      t.lineCap = 'square';
+      t.beginPath();
+      switch (PALETTE_TEXTURE[slot]) {
+        case 'dots':
+          t.arc(px / 2, px / 2, px * 0.13, 0, Math.PI * 2);
+          t.fill();
+          break;
+        case 'diagonal':
+          // 斜率 -1 的三条线，保证相邻贴片接缝处连续
+          for (const k of [-0.5, 0, 0.5, 1]) {
+            t.moveTo(k * px - px * 0.5, px);
+            t.lineTo(k * px + px * 0.5, 0);
+          }
+          t.stroke();
+          break;
+        case 'grid':
+          t.moveTo(px / 2, 0);
+          t.lineTo(px / 2, px);
+          t.moveTo(0, px / 2);
+          t.lineTo(px, px / 2);
+          t.stroke();
+          break;
+        case 'hstripes':
+          t.moveTo(0, px * 0.3);
+          t.lineTo(px, px * 0.3);
+          t.moveTo(0, px * 0.7);
+          t.lineTo(px, px * 0.7);
+          t.stroke();
+          break;
+      }
+      const pat = this.ctx.createPattern(tile, 'repeat');
+      // 贴片按设备像素绘制，这里缩回 CSS 像素坐标
+      pat?.setTransform(new DOMMatrix().scale(1 / this.dpr));
+      return pat;
+    });
   }
 
   /** 每次收到权威玩家状态时调用，更新补间目标 */
@@ -118,8 +216,41 @@ export class BoardRenderer {
     }
   }
 
-  resetTweens(): void {
+  /** 新一局或重连：清空补间与特效 */
+  reset(): void {
     this.tweens.clear();
+    this.particles = [];
+    this.ghosts.clear();
+    this.paintedAt.fill(0);
+  }
+
+  /** 格子刚被染色：播放弹出动画 */
+  markPainted(idx: number, now: number): void {
+    if (idx >= 0 && idx < this.paintedAt.length) this.paintedAt[idx] = now;
+  }
+
+  /** 在格子中心喷出若干粒子 */
+  burst(idx: number, slot: number, n: number): void {
+    if (REDUCED_MOTION || n <= 0) return;
+    const c = this.cell;
+    const cx = (idx % this.gw) * c + c / 2;
+    const cy = Math.floor(idx / this.gw) * c + c / 2;
+    const color = PALETTE[slot]?.color ?? '#999';
+    for (let i = 0; i < n && this.particles.length < MAX_PARTICLES; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = (0.04 + Math.random() * 0.1) * (c / 24);
+      const max = 260 + Math.random() * 260;
+      this.particles.push({
+        x: cx,
+        y: cy,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 0.03 * (c / 24),
+        life: max,
+        max,
+        size: Math.max(3, c * (0.18 + Math.random() * 0.16)),
+        color,
+      });
+    }
   }
 
   private pos(tw: Tween, now: number): { x: number; y: number } {
@@ -127,8 +258,10 @@ export class BoardRenderer {
     return { x: tw.fx + (tw.tx - tw.fx) * k, y: tw.fy + (tw.ty - tw.fy) * k };
   }
 
-  draw(game: ClientGame, labels: ReadonlyMap<string, PlayerLabel>, now: number): void {
+  draw(game: ClientGame, labels: ReadonlyMap<string, PlayerLabel>, now: number, opts: DrawOpts): void {
     const { ctx, cell: c, gw, gh } = this;
+    const dt = this.lastDraw ? Math.min(50, now - this.lastDraw) : 16;
+    this.lastDraw = now;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, gw * c, gh * c);
 
@@ -136,12 +269,31 @@ export class BoardRenderer {
     ctx.fillStyle = '#F7F8FC';
     ctx.fillRect(0, 0, gw * c, gh * c);
 
-    // 地块
+    // 地块：同一玩家的格子合成一条路径，先填浅色再叠纹理。
+    // 刚染上的格子单独画：从小弹到满格，并带一层白色闪光。
+    const pops: number[] = [];
+    const paths = PALETTE.map(() => new Path2D());
+    const has = PALETTE.map(() => false);
     for (let i = 0; i < game.cells.length; i++) {
       const o = game.cells[i]!;
-      if (o < 0) continue;
+      if (o < 0 || o >= paths.length) continue;
+      const age = now - (this.paintedAt[i] ?? 0);
+      if (age < POP_MS && !REDUCED_MOTION) {
+        pops.push(i);
+        continue;
+      }
+      paths[o]!.rect((i % gw) * c, Math.floor(i / gw) * c, c, c);
+      has[o] = true;
+    }
+    for (let o = 0; o < paths.length; o++) {
+      if (!has[o]) continue;
       ctx.fillStyle = CELL_TINT[o]!;
-      ctx.fillRect((i % gw) * c, Math.floor(i / gw) * c, c, c);
+      ctx.fill(paths[o]!);
+      const pat = this.patterns[o];
+      if (pat) {
+        ctx.fillStyle = pat;
+        ctx.fill(paths[o]!);
+      }
     }
 
     // 网格线
@@ -158,6 +310,63 @@ export class BoardRenderer {
     }
     ctx.stroke();
 
+    for (const i of pops) {
+      const o = game.cells[i]!;
+      const k = Math.min(1, (now - this.paintedAt[i]!) / POP_MS);
+      const s = c * Math.min(1.12, 0.45 + 0.55 * easeOutBack(k));
+      const x = (i % gw) * c + (c - s) / 2;
+      const y = Math.floor(i / gw) * c + (c - s) / 2;
+      ctx.fillStyle = CELL_TINT[o]!;
+      ctx.fillRect(x, y, s, s);
+      ctx.fillStyle = `rgba(255, 255, 255, ${0.65 * (1 - k)})`;
+      ctx.fillRect(x, y, s, s);
+    }
+
+    // 冲刺拖影
+    for (const p of game.players) {
+      const label = labels.get(p.id);
+      if (label?.left) continue;
+      const tw = this.tweens.get(p.id);
+      const pos = tw ? this.pos(tw, now) : { x: p.x, y: p.y };
+      let list = this.ghosts.get(p.id);
+      if (p.dashLeft > 0 && !REDUCED_MOTION) {
+        if (!list) this.ghosts.set(p.id, (list = []));
+        list.push({ x: pos.x, y: pos.y, t: now });
+      }
+      if (!list) continue;
+      while (list.length && now - list[0]!.t > GHOST_MS) list.shift();
+      const color = PALETTE[p.slot]!.color;
+      for (const g of list) {
+        const k = 1 - (now - g.t) / GHOST_MS;
+        const s = c * (0.5 + 0.35 * k);
+        ctx.globalAlpha = 0.35 * k;
+        ctx.fillStyle = color;
+        roundRect(ctx, g.x * c + (c - s) / 2, g.y * c + (c - s) / 2, s, s, s * 0.25);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 粒子
+    if (this.particles.length) {
+      const alive: Particle[] = [];
+      for (const pt of this.particles) {
+        pt.life -= dt;
+        if (pt.life <= 0) continue;
+        pt.vy += 0.0004 * dt * (c / 24);
+        pt.x += pt.vx * dt;
+        pt.y += pt.vy * dt;
+        const k = pt.life / pt.max;
+        ctx.globalAlpha = Math.min(1, k * 1.4);
+        ctx.fillStyle = pt.color;
+        const s = pt.size * (0.5 + 0.5 * k);
+        ctx.fillRect(pt.x - s / 2, pt.y - s / 2, s, s);
+        alive.push(pt);
+      }
+      ctx.globalAlpha = 1;
+      this.particles = alive;
+    }
+
     // 角色（自己最后画，保证在最上层）
     const order = [...game.players].sort(
       (a, b) => Number(labels.get(a.id)?.you ?? false) - Number(labels.get(b.id)?.you ?? false),
@@ -167,8 +376,28 @@ export class BoardRenderer {
       if (label?.left) continue;
       const tw = this.tweens.get(p.id);
       const pos = tw ? this.pos(tw, now) : { x: p.x, y: p.y };
+      if (label?.you && opts.highlightYou > 0) this.drawYouRing(pos.x, pos.y, now, opts.highlightYou, p.slot);
       this.drawPlayer(p, pos.x, pos.y, label);
     }
+  }
+
+  /** "你在这里"：脉冲光圈 */
+  private drawYouRing(gx: number, gy: number, now: number, strength: number, slot: number): void {
+    const { ctx, cell: c } = this;
+    const cx = gx * c + c / 2;
+    const cy = gy * c + c / 2;
+    const phase = (now % 900) / 900;
+    ctx.save();
+    for (let i = 0; i < 2; i++) {
+      const k = (phase + i * 0.5) % 1;
+      ctx.globalAlpha = strength * (1 - k) * 0.8;
+      ctx.strokeStyle = PALETTE[slot]!.color;
+      ctx.lineWidth = Math.max(2, c * 0.12);
+      ctx.beginPath();
+      ctx.arc(cx, cy, c * (0.7 + k * 1.6), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   private drawPlayer(p: PState, gx: number, gy: number, label: PlayerLabel | undefined): void {
@@ -176,7 +405,7 @@ export class BoardRenderer {
     const pal = PALETTE[p.slot]!;
     const cx = gx * c + c / 2;
     const cy = gy * c + c / 2;
-    const size = c * 0.92;
+    const size = c * (p.dashLeft > 0 ? 1.0 : 0.92);
     const dim = p.frozen || label?.offline;
 
     ctx.save();
@@ -184,7 +413,7 @@ export class BoardRenderer {
     // 冲刺光晕
     if (p.dashLeft > 0) {
       ctx.shadowColor = pal.color;
-      ctx.shadowBlur = c * 0.8;
+      ctx.shadowBlur = c * 0.9;
     } else {
       ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
       ctx.shadowBlur = c * 0.25;
@@ -194,9 +423,22 @@ export class BoardRenderer {
     ctx.fillStyle = pal.color;
     ctx.fill();
     ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
     ctx.lineWidth = Math.max(1.5, c * 0.08);
     ctx.strokeStyle = label?.you ? '#0F172A' : '#FFFFFF';
     ctx.stroke();
+
+    // 自己的冲刺冷却环：一圈逐渐补满，满了就能再冲
+    if (label?.you && p.dashLeft === 0 && p.cdLeft > 0) {
+      const prog = 1 - p.cdLeft / DASH_COOLDOWN_TICKS;
+      ctx.beginPath();
+      ctx.arc(cx, cy, size * 0.72, -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.35)';
+      ctx.lineWidth = Math.max(1.5, c * 0.07);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
 
     // 形状标记：不依赖颜色也能分清是谁
     traceShape(ctx, pal.shape, cx, cy, c * 0.24);

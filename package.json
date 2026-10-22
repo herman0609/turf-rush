@@ -22,6 +22,7 @@
     "test": "vitest run",
     "typecheck": "tsc -p shared && tsc -p server && tsc -p client && tsc -p scripts",
     "sim": "tsx scripts/sim-match.ts",
+    "bots": "tsx scripts/bots.ts",
     "verify": "npm run typecheck && npm run test && npm run build && npm run sim"
   },
   "devDependencies": {

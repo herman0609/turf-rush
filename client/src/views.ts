@@ -4,6 +4,7 @@ import { MAX_PLAYERS, NAME_MAX, PALETTE } from '@turf/shared/constants';
 import type { MemberView, RoomStatus, RoomView } from '@turf/shared/protocol';
 import { normalizeRoomCode, randomName, startBlocker } from '@turf/shared/util';
 import { h } from './dom';
+import { muteButton } from './audio';
 
 export interface Action {
   label: string;
@@ -254,6 +255,7 @@ export function lobbyView(opts: {
     h(
       'div',
       { class: 'card wide' },
+      h('div', { class: 'card-corner' }, muteButton()),
       h(
         'header',
         { class: 'lobby-head' },
