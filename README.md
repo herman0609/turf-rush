@@ -6,6 +6,14 @@
 
 代码仓库：<https://github.com/herman0609/turf-rush> · 设计方案与取舍记录：[docs/DECISIONS.md](docs/DECISIONS.md)
 
+<p>
+  <img src="docs/screenshots/03-lobby.png" width="32%" alt="大厅：房间码、邀请链接、玩家与准备状态">
+  <img src="docs/screenshots/05-playing.png" width="32%" alt="4 人对局：实时比分条与反超提示">
+  <img src="docs/screenshots/06-weak-net-debug.png" width="32%" alt="lag=200 加 chaos 下的调试面板">
+</p>
+
+更多截图在 [docs/screenshots](docs/screenshots)；开发分工、时间线和范围取舍见 [docs/开发过程与AI协作.md](docs/开发过程与AI协作.md)。
+
 > 部署在 Render 免费实例上：15 分钟无人访问会休眠，休眠后第一次打开需要等待约 1 分钟冷启动。房间只保存在服务器内存里，服务重启或重新部署后房间会失效，页面会给出提示。
 
 ## 怎么玩
