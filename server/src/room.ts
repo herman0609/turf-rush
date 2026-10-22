@@ -11,6 +11,7 @@ import {
   COUNTDOWN_MS,
   MAX_CATCHUP_TICKS,
   MAX_INPUTS_PER_TICK,
+  MAX_INPUT_LEAD_TICKS,
   MAX_INPUT_QUEUE,
   MAX_PLAYERS,
   MAX_SPECTATORS,
@@ -49,6 +50,8 @@ export interface Link {
 
 interface QueuedCmd {
   seq: number;
+  /** 在哪个 tick 应用（已钳制、单调） */
+  tick: number;
   dir?: 'U' | 'D' | 'L' | 'R';
   dash?: boolean;
 }
@@ -287,7 +290,12 @@ export class Room {
     if (msg.seq <= m.lastSeq) return drop(); // 重复或过期
     m.lastSeq = msg.seq;
     if (m.queue.length >= MAX_INPUT_QUEUE) return drop();
-    m.queue.push({ seq: msg.seq, dir: msg.dir, dash: msg.dash });
+    // 目标 tick：不早于下一个 tick（不能改写过去），不晚于 next+10；队列内保持单调
+    const next = (this.game?.tick ?? 0) + 1;
+    const want = msg.tick ?? next;
+    const lastTick = m.queue.length > 0 ? m.queue[m.queue.length - 1]!.tick : next;
+    const tick = Math.max(lastTick, Math.min(next + MAX_INPUT_LEAD_TICKS, Math.max(next, want)));
+    m.queue.push({ seq: msg.seq, tick, dir: msg.dir, dash: msg.dash });
   }
 
   // ------------------------------------------------------------------ 时间推进
@@ -345,7 +353,10 @@ export class Room {
     for (const p of game.players) {
       const m = this.members.get(p.id);
       const active = !!m && m.online && !m.left;
-      const cmds = m && active ? m.queue.splice(0, MAX_INPUTS_PER_TICK) : [];
+      // 只取目标 tick 已到的输入（按 seq 顺序，每 tick 最多 MAX_INPUTS_PER_TICK 条）
+      let n = 0;
+      if (m && active) while (n < m.queue.length && n < MAX_INPUTS_PER_TICK && m.queue[n]!.tick <= game.tick + 1) n++;
+      const cmds = m && active ? m.queue.splice(0, n) : [];
       if (m && cmds.length > 0) m.ack = cmds[cmds.length - 1]!.seq;
       inputs[p.id] = { cmds, frozen: !active };
     }
@@ -540,6 +551,8 @@ export class Room {
       y: p.y,
       dir: p.dir,
       moving: p.moving,
+      progress: p.progress,
+      queue: p.queue.slice(),
       dashLeft: p.dashLeft,
       cdLeft: p.cdLeft,
       frozen: p.frozen,

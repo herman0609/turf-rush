@@ -12,8 +12,9 @@ import { ClientSync } from '../client/src/sync';
 import { createApp, type App } from '../server/src/app';
 import { silentLogger } from '../server/src/log';
 
-const MATCH_SECONDS = Number(process.env.SIM_SECONDS ?? 5);
 const REMOTE = process.env.SIM_URL?.replace(/\/$/, '');
+// 本地自带服务时对局缩短为 5 秒；连线上服务时对局时长由服务端决定（默认 60 秒），超时按它来算
+const MATCH_SECONDS = Number(process.env.SIM_SECONDS ?? (REMOTE ? 60 : 5));
 const ROUNDS = Number(process.env.SIM_ROUNDS ?? 2);
 
 const t0 = Date.now();

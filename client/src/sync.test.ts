@@ -61,11 +61,34 @@ describe('ClientSync', () => {
     expect(s.stats.staleTicks).toBe(2);
   });
 
-  it('跳号时不应用并报告 gap', () => {
+  it('乱序：稍微超前的 tick 先暂存，缺的那条到了再按顺序应用（每个 tick 都回调一次）', () => {
+    const s = new ClientSync();
+    const applied: number[] = [];
+    s.onApplied = (g) => applied.push(g.tick);
+    s.applySnapshot(snap());
+    expect(s.applyTick(tick(13, [2, 1]))).toBe('buffered');
+    expect(s.applyTick(tick(12, [1, 1]))).toBe('buffered');
+    expect(s.game!.cells).toEqual([0, -1, -1, 1]); // 还没应用
+    expect(s.applyTick(tick(12))).toBe('stale'); // 暂存区里的重复消息
+    expect(s.applyTick(tick(11, [1, 0]))).toBe('ok');
+    expect(applied).toEqual([11, 12, 13]);
+    expect(s.tick).toBe(13);
+    expect(s.game!.cells).toEqual([0, 1, 1, 1]); // 12 覆盖了 11 对格子 1 的修改
+    expect(s.stats.reordered).toBe(2);
+    expect(s.stats.gaps).toBe(0);
+  });
+
+  it('超出重排窗口：报告 gap 并清空暂存；快照之后正常衔接', () => {
     const s = new ClientSync();
     s.applySnapshot(snap());
-    expect(s.applyTick(tick(13, [1, 0]))).toBe('gap');
-    expect(s.game!.cells[1]).toBe(-1);
+    expect(s.applyTick(tick(30))).toBe('gap');
+    for (const t of [12, 13, 14, 15]) expect(s.applyTick(tick(t))).toBe('buffered');
+    expect(s.applyTick(tick(16))).toBe('gap'); // 期望 11，窗口只到 15
+    // 快照到 tick 11 之后，新到的 12 起正常衔接
+    s.applySnapshot({ ...snap(), tick: 11, game: { ...snap().game!, tick: 11 } });
+    expect(s.applyTick(tick(13))).toBe('buffered');
+    expect(s.applyTick(tick(12))).toBe('ok');
+    expect(s.tick).toBe(13);
   });
 
   it('上一局的 tick 一律视为旧消息', () => {

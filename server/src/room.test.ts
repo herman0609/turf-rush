@@ -167,6 +167,41 @@ describe('输入校验', () => {
     expect(a.link.stats.dropped).toBe(1);
   });
 
+  it('目标 tick：未到不应用；过去的放到下一个 tick；过远的钳到 next+10；队列内单调', () => {
+    const { a } = startTwo();
+    advance(COUNTDOWN_MS + TICK_MS * 4);
+    const me = () => a.link.last('tick')!.players.find((p) => p.id === a.m.id)!;
+    const t0 = room.game!.tick;
+    room.handle(a.m, { t: 'input', seq: 1, tick: t0 + 3, dir: 'D' }, now);
+    advance(TICK_MS * 2);
+    expect(me().ack).toBe(0);
+    advance(TICK_MS);
+    expect(me().ack).toBe(1);
+    // 过去的 tick 不能改写历史：放到下一个 tick 应用
+    room.handle(a.m, { t: 'input', seq: 2, tick: 1, dir: 'L' }, now);
+    advance(TICK_MS);
+    expect(me().ack).toBe(2);
+    // 太远的未来钳到 next+10；后到的 seq 4 想插队到更早的 tick，也只能排在 seq 3 之后
+    const t1 = room.game!.tick;
+    room.handle(a.m, { t: 'input', seq: 3, tick: t1 + 500, dash: true }, now);
+    room.handle(a.m, { t: 'input', seq: 4, tick: t1 + 1, dir: 'U' }, now);
+    advance(TICK_MS * 10);
+    expect(me().ack).toBe(2);
+    advance(TICK_MS);
+    expect(me().ack).toBe(4);
+  });
+
+  it('下发的玩家状态包含 progress 与 queue（客户端预测需要）', () => {
+    const { a } = startTwo();
+    advance(COUNTDOWN_MS + TICK_MS);
+    room.handle(a.m, { t: 'input', seq: 1, dir: 'D' }, now);
+    advance(TICK_MS);
+    const p = a.link.last('tick')!.players.find((x) => x.id === a.m.id)!;
+    const g = room.game!.players.find((x) => x.id === a.m.id)!;
+    expect(p.progress).toBe(g.progress);
+    expect(p.queue).toEqual(g.queue);
+  });
+
   it('客户端无法影响其他玩家', () => {
     const { a, b } = startTwo();
     advance(COUNTDOWN_MS);

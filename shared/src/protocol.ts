@@ -21,7 +21,7 @@ const StartSchema = z.strictObject({ t: z.literal('start') });
 const InputSchema = z.strictObject({
   t: z.literal('input'),
   seq: z.number().int().min(1).max(2 ** 31 - 1),
-  /** 目标 tick（M4 启用），缺省表示"收到即在下一个 tick 应用" */
+  /** 希望在哪个 tick 生效（客户端预测用）。服务端钳制到 [next, next+10]；缺省表示下一个 tick */
   tick: z.number().int().min(0).max(1_000_000).optional(),
   dir: DirSchema.optional(),
   dash: z.literal(true).optional(),
@@ -108,6 +108,10 @@ export interface PState {
   y: number;
   dir: Dir;
   moving: boolean;
+  /** 距离下一次前进累计的单位数（客户端预测需要它才能精确重演） */
+  progress: number;
+  /** 已排队、将在下一次前进时生效的转向 */
+  queue: Dir[];
   dashLeft: number;
   cdLeft: number;
   frozen: boolean;

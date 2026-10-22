@@ -5,7 +5,9 @@ import { PROTOCOL_VERSION, SEAT_GRACE_MS, type Dir } from '@turf/shared/constant
 import type { RoomView, S2C } from '@turf/shared/protocol';
 import { normalizeRoomCode } from '@turf/shared/util';
 import { installAudioUnlock, sfx } from './audio';
+import { DebugPanel, type DebugRow } from './debug';
 import { clear, copyText, setNetBar, toast } from './dom';
+import { NetView } from './motion';
 import { Connection, wsUrl } from './net';
 import * as session from './session';
 import { Stage } from './stage';
@@ -48,6 +50,12 @@ export class App {
   private resultSeenRound = -1;
   /** 用户已关闭结算层的局号 */
   private dismissedRound = -1;
+  /** 插值 + 预测：把权威状态变成每帧要画的样子 */
+  private net = new NetView();
+  private debug: DebugPanel | null = null;
+  private fps = 0;
+  private fpsFrames = 0;
+  private fpsAt = 0;
 
   constructor(private readonly root: HTMLElement) {}
 
@@ -55,6 +63,8 @@ export class App {
     window.addEventListener('popstate', () => this.route());
     window.addEventListener('keydown', (e) => this.onKey(e));
     installAudioUnlock();
+    this.debug = new DebugPanel();
+    window.setInterval(() => this.updateDebug(), 250);
     window.addEventListener('resize', () => {
       if (this.stage && this.sync.game) this.stage.layout(this.sync.game, true);
     });
@@ -71,7 +81,8 @@ export class App {
   // ------------------------------------------------------------------ 路由
 
   private navigate(path: string): void {
-    if (location.pathname !== path) history.pushState(null, '', path);
+    // 保留查询参数（?lag / ?debug 等），刷新后仍是同样的调试环境；邀请链接不带这些参数
+    if (location.pathname !== path) history.pushState(null, '', path + location.search);
     this.route();
   }
 
@@ -186,6 +197,12 @@ export class App {
     this.code = code;
     this.name = name;
     this.sync = new ClientSync();
+    // 每个被应用的 tick（包括乱序重排后补上的）都要喂给插值历史和特效，不能只看"最后一条"
+    this.sync.onApplied = (g, round) => {
+      this.net.onTick(g, this.you);
+      this.stage?.onTick(g, round, performance.now());
+    };
+    this.net = new NetView();
     this.you = null;
     this.stage = null;
     this.mount(connectingView('正在进入房间…'), 'connecting');
@@ -253,6 +270,7 @@ export class App {
       case 'welcome':
         this.you = msg.you;
         this.seq = 0; // seq 按连接计数，服务端同样在新连接上归零
+        this.net.resetInputs(); // 旧连接上没确认的输入随旧连接作废
         session.setIdentity(code, { playerId: msg.you, token: msg.token });
         if (this.retry) {
           this.stopRetry();
@@ -263,6 +281,7 @@ export class App {
       case 'snapshot': {
         const prev = this.sync.room;
         this.sync.applySnapshot(msg);
+        if (this.sync.game) this.net.onSnapshot(this.sync.game);
         this.resyncAt = 0;
         if (this.justWelcomed) {
           this.justWelcomed = false;
@@ -281,9 +300,9 @@ export class App {
         return;
       }
       case 'tick': {
+        // 应用（以及乱序补齐）时由 sync.onApplied 驱动插值与特效；这里只处理需要快照的情况
         const r = this.sync.applyTick(msg);
         if (r === 'gap' || r === 'mismatch') this.requestResync(conn);
-        if ((r === 'ok' || r === 'mismatch') && this.stage && this.sync.game) this.stage.onTick(this.sync.game, this.sync.round, performance.now());
         return;
       }
       case 'error':
@@ -454,7 +473,12 @@ export class App {
       return;
     }
     if (!this.stage) {
-      this.stage = new Stage({ onRematch: () => this.onRematch(), onLeave: () => this.leave() });
+      this.stage = new Stage({
+        onRematch: () => this.onRematch(),
+        onLeave: () => this.leave(),
+        onDir: (dir) => this.sendDir(dir),
+        onDash: () => this.sendDash(),
+      });
     }
     if (this.stage.round !== this.sync.round) this.stage.newRound(this.sync.round);
     if (this.view !== 'stage') {
@@ -474,7 +498,17 @@ export class App {
         this.raf = 0;
         return;
       }
-      this.stage.frame({ room, game, you: this.you, serverNow: this.conn?.serverNow() ?? Date.now(), now: t });
+      const conn = this.conn;
+      const serverNow = conn?.serverNow() ?? Date.now();
+      const clock = { synced: !!conn?.synced, serverNow, rtt: conn?.rtt ?? 0, jitter: conn?.jitter ?? 0 };
+      const view = this.net.frame(game, room, this.you, clock, t);
+      this.stage.frame({ room, game, view, you: this.you, serverNow, now: t });
+      this.fpsFrames++;
+      if (t - this.fpsAt >= 1000) {
+        this.fps = Math.round((this.fpsFrames * 1000) / (t - this.fpsAt));
+        this.fpsFrames = 0;
+        this.fpsAt = t;
+      }
       this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
@@ -555,23 +589,91 @@ export class App {
       toast(sfx.muted ? '已静音' : '音效已打开', 'info', 1200);
       return;
     }
+    // `：切换调试面板
+    if (e.code === 'Backquote' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      this.debug?.toggle();
+      this.updateDebug();
+      return;
+    }
     if (this.view !== 'stage') return;
-    const room = this.sync.room;
-    if (!room || (room.phase !== 'countdown' && room.phase !== 'playing')) return;
     const dir = KEYMAP[e.code];
     const dash = e.code === 'Space';
     if (!dir && !dash) return;
+    if (!this.inputTarget()) return;
     e.preventDefault();
     if (e.repeat) return;
-    const mine = this.sync.game?.players.find((p) => p.id === this.you);
-    if (!mine) return;
-    if (dir) {
-      this.conn?.send({ t: 'input', seq: ++this.seq, dir });
-      if (dir !== mine.dir || !mine.moving) sfx.turn();
-    } else {
-      this.conn?.send({ t: 'input', seq: ++this.seq, dash: true });
-      // 本地看冷却已好、且正在对局中：立即给声音反馈，最终以服务端为准
-      if (room.phase === 'playing' && mine.cdLeft === 0 && mine.dashLeft === 0) this.stage?.noteLocalDash(performance.now());
+    if (dir) this.sendDir(dir);
+    else this.sendDash();
+  }
+
+  /** 能否发送输入：对局（或倒计时）中、且自己是参赛者。返回自己当前（预测）状态 */
+  private inputTarget() {
+    const room = this.sync.room;
+    if (this.view !== 'stage' || !room || (room.phase !== 'countdown' && room.phase !== 'playing')) return null;
+    const auth = this.sync.game?.players.find((p) => p.id === this.you);
+    if (!auth) return null;
+    return { room, mine: this.net.predictedMe ?? auth };
+  }
+
+  /**
+   * 发送一条输入：带单调递增的 seq 和"希望生效的 tick"（预测时间轴上的下一个 tick）。
+   * 同一条输入同时放进本地预测的待确认队列，画面立即响应；服务端在那个 tick 应用后再确认。
+   */
+  private send(cmd: { dir?: Dir; dash?: true }): void {
+    if (!this.conn) return;
+    const tick = this.net.inputTick();
+    const seq = ++this.seq;
+    this.conn.send({ t: 'input', seq, tick, ...cmd });
+    this.net.predictor.add({ seq, tick: tick ?? this.sync.tick + 1, ...cmd });
+  }
+
+  private sendDir(dir: Dir): void {
+    const t = this.inputTarget();
+    if (!t) return;
+    this.send({ dir });
+    if (dir !== t.mine.dir || !t.mine.moving) sfx.turn();
+  }
+
+  private sendDash(): void {
+    const t = this.inputTarget();
+    if (!t) return;
+    this.send({ dash: true });
+    // 冷却已好、且正在对局中：立即给声音反馈（预测也会立即画出冲刺），最终以服务端为准
+    if (t.room.phase === 'playing' && t.mine.cdLeft === 0 && t.mine.dashLeft === 0) this.stage?.noteLocalDash(performance.now());
+  }
+
+  // ------------------------------------------------------------------ 调试面板
+
+  private updateDebug(): void {
+    const d = this.debug;
+    if (!d?.visible) return;
+    const c = this.conn;
+    const st = this.sync.stats;
+    const ns = this.net.stats;
+    const live = this.sync.room?.phase === 'playing' || this.sync.room?.phase === 'countdown';
+    const rows: DebugRow[] = [
+      ['连接', c && !c.closed ? (c.synced ? '已连接 · 时钟已同步' : '已连接 · 同步时钟中') : '未连接', !c || c.closed],
+      ['ping (RTT)', c ? `${Math.round(c.rtt)} ms ±${Math.round(c.jitter)}` : '-', !!c && c.rtt > 250],
+      ['时钟偏差', c ? `${Math.round(c.offset)} ms` : '-'],
+      ['房间', this.sync.room ? `${this.sync.room.code} · ${this.sync.room.phase} · R${this.sync.round}` : '-'],
+      ['权威 tick', this.sync.game ? `${ns.authTick} / ${this.sync.game.endTick}` : '-'],
+      ['估计服务端 tick', live ? ns.serverTick.toFixed(1) : '-'],
+      ['他人插值', live ? `落后 ${ns.interpBehind.toFixed(1)} tick` : '-'],
+      ['自己预测', live ? `领先 ${ns.predictAhead.toFixed(1)} tick` : '-'],
+      ['待确认输入', live ? String(ns.pending) : '-'],
+      ['预测纠正', String(ns.corrections), ns.corrections > 0],
+      ['丢弃：过期/重复 tick', String(st.staleTicks), st.staleTicks > 0],
+      ['乱序重排', String(st.reordered)],
+      ['丢弃：过期房间状态', String(st.staleRooms)],
+      ['丢弃：服务端拒收输入', String(c?.serverDropped ?? 0), (c?.serverDropped ?? 0) > 0],
+      ['断档 / 校验不一致', `${st.gaps} / ${st.mismatches}`, st.gaps + st.mismatches > 0],
+      ['全量快照', String(st.snapshots)],
+      ['已应用增量', String(st.ticks)],
+    ];
+    if (c && (c.chaos.dupIn || c.chaos.swapIn || c.chaos.dupOut)) {
+      rows.push(['chaos 注入', `↓重复 ${c.chaos.dupIn} ↓乱序 ${c.chaos.swapIn} ↑重复 ${c.chaos.dupOut}`]);
     }
+    rows.push(['帧率', this.view === 'stage' ? `${this.fps} fps` : '-']);
+    d.update(rows);
   }
 }

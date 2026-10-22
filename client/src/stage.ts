@@ -1,27 +1,40 @@
 // 对局舞台：棋盘 + HUD + 倒计时 + 结算层。DOM 只在需要时更新，Canvas 每帧重画。
 // 所有"游戏感"反馈（音效、粒子、反超提示、庆祝）都由服务端下发的状态变化驱动，本地不做任何判定。
 
-import { GRID_H, GRID_W, PALETTE, TICK_MS } from '@turf/shared/constants';
+import { GRID_H, GRID_W, PALETTE, TICK_MS, type Dir } from '@turf/shared/constants';
 import type { RoomView } from '@turf/shared/protocol';
 import { muteButton, sfx } from './audio';
 import { h } from './dom';
 import { confetti, countUp, stopConfetti } from './fx';
 import { BoardRenderer, type PlayerLabel } from './render';
+import type { NetFrame } from './motion';
 import type { ClientGame } from './sync';
 import { playerBadge } from './views';
 
 export interface StageHandlers {
   onRematch: () => void;
   onLeave: () => void;
+  onDir: (dir: Dir) => void;
+  onDash: () => void;
 }
 
 export interface Frame {
   room: RoomView;
+  /** 权威状态：计时、比分、胜负都只看它 */
   game: ClientGame;
+  /** 绘制用：自己是预测状态、其他人是插值位置 */
+  view: NetFrame;
   you: string | null;
   serverNow: number;
   now: number;
 }
+
+/** 触屏：滑动超过这个距离（CSS 像素）算一次转向 */
+const SWIPE_PX = 22;
+const TAP_MS = 250;
+export const TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+/** 预测染色的特效记录保留多久（权威确认通常在一个 RTT 内到达） */
+const PREDICTED_FX_MS = 2000;
 
 const REASON_TEXT = {
   time: '时间到',
@@ -71,6 +84,8 @@ export class Stage {
   private resultTimer = 0;
   private calloutTimer = 0;
   private localDashAt = -1e9;
+  /** 自己预测染色时已播放过特效的格子 → 播放时间；权威确认时不再重复播放 */
+  private predictedFx = new Map<number, number>();
 
   constructor(private readonly handlers: StageHandlers) {
     this.timerEl = h('div', { class: 'timer', 'aria-label': '剩余时间' }, '60');
@@ -82,6 +97,12 @@ export class Stage {
     this.calloutEl = h('div', { class: 'callout hidden', 'aria-live': 'polite' });
     this.resultEl = h('div', { class: 'result hidden', role: 'dialog', 'aria-modal': 'true' });
     this.boardWrap = h('div', { class: 'board-wrap' }, this.renderer.canvas, this.countdownEl, this.calloutEl);
+    this.installTouch();
+    const dashBtn = h('button', { class: 'touch-dash', type: 'button', 'aria-label': '冲刺' }, '冲刺');
+    dashBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.handlers.onDash();
+    });
     this.el = h(
       'main',
       { class: 'stage' },
@@ -93,7 +114,13 @@ export class Stage {
       ),
       this.bannerEl,
       this.boardWrap,
-      h('p', { class: 'controls' }, h('span', {}, '方向键 / WASD 转向 · 空格 冲刺 · M 静音'), this.dashEl),
+      h(
+        'p',
+        { class: 'controls' },
+        h('span', {}, TOUCH ? '在棋盘上滑动转向 · 轻点棋盘或按钮冲刺' : '方向键 / WASD 转向 · 空格 冲刺 · M 静音 · ` 调试面板'),
+        this.dashEl,
+      ),
+      TOUCH ? dashBtn : null,
       this.resultEl,
     );
   }
@@ -104,6 +131,7 @@ export class Stage {
     this.structKey = '';
     this.notesKey = '';
     this.shadow = null;
+    this.predictedFx.clear();
     this.combo = 0;
     this.prevDash.clear();
     this.prevCd.clear();
@@ -126,7 +154,7 @@ export class Stage {
 
   /** 收到全量快照（加入、重连、resync）：只同步影子状态，不播放特效 */
   onSnapshot(game: ClientGame, round: number, now: number): void {
-    this.renderer.onPlayers(game.players, now);
+    void now;
     this.shadow = Int8Array.from(game.cells);
     this.shadowRound = round;
     for (const p of game.players) {
@@ -137,7 +165,6 @@ export class Stage {
 
   /** 每个权威 tick：比较前后状态，驱动特效、音效和反超提示 */
   onTick(game: ClientGame, round: number, now: number): void {
-    this.renderer.onPlayers(game.players, now);
     if (!this.shadow || this.shadowRound !== round || this.shadow.length !== game.cells.length) {
       this.onSnapshot(game, round, now);
       return;
@@ -153,8 +180,13 @@ export class Stage {
       if (o === prev) continue;
       this.shadow[i] = o;
       if (o < 0) continue;
-      this.renderer.markPainted(i, now);
       const stolen = prev >= 0;
+      if (o === mySlot && this.predictedFx.has(i)) {
+        // 预测时已经播过弹出、粒子和音效：权威确认只更新影子状态
+        this.predictedFx.delete(i);
+        continue;
+      }
+      this.renderer.markPainted(i, now);
       if (o === mySlot) {
         painted++;
         if (stolen) stole++;
@@ -185,6 +217,62 @@ export class Stage {
     }
 
     if (game.tick > 0) this.trackLead(game, now);
+  }
+
+  /** 预测出自己新染的格子：立即播放特效与音效（不必等一个 RTT 的权威确认） */
+  private onPredictedPaints(game: ClientGame, paints: readonly number[], mySlot: number, now: number): void {
+    if (mySlot < 0) return;
+    let painted = 0;
+    let stole = 0;
+    for (const i of paints) {
+      if (this.predictedFx.has(i) || game.cells[i] === mySlot) continue;
+      this.predictedFx.set(i, now);
+      const stolen = (game.cells[i] ?? -1) >= 0;
+      this.renderer.markPainted(i, now);
+      this.renderer.burst(i, mySlot, stolen ? 7 : 3);
+      painted++;
+      if (stolen) stole++;
+    }
+    if (painted) {
+      this.combo = now - this.lastPaintAt < 400 ? this.combo + 1 : 0;
+      this.lastPaintAt = now;
+      if (stole) sfx.steal();
+      else sfx.paint(this.combo);
+    }
+    // 没被确认的预测（被纠正了）过期清理
+    if (this.predictedFx.size > 64) {
+      for (const [i, t] of this.predictedFx) if (now - t > PREDICTED_FX_MS) this.predictedFx.delete(i);
+    }
+  }
+
+  /** 触屏：在棋盘上滑动转向（一次手势可以连续转多次），轻点冲刺 */
+  private installTouch(): void {
+    const el = this.boardWrap;
+    let start: { x: number; y: number; t: number; id: number; turned: boolean } | null = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      e.preventDefault();
+      start = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId, turned: false };
+      el.setPointerCapture?.(e.pointerId);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!start || e.pointerId !== start.id) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_PX) return;
+      const dir: Dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'R' : 'L') : dy > 0 ? 'D' : 'U';
+      this.handlers.onDir(dir);
+      // 以当前点为新起点：不抬手也能接着划出下一个方向
+      start = { ...start, x: e.clientX, y: e.clientY, turned: true };
+    });
+    const end = (e: PointerEvent) => {
+      if (!start || e.pointerId !== start.id) return;
+      const tap = !start.turned && performance.now() - start.t < TAP_MS;
+      start = null;
+      if (tap && e.type === 'pointerup') this.handlers.onDash();
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
   }
 
   /** 按下冲刺键且本地判断大概率可用时，立即播放音效（服务端确认前就有反馈） */
@@ -247,7 +335,7 @@ export class Stage {
   private labels = new Map<string, PlayerLabel>();
 
   frame(f: Frame): void {
-    const { room, game, you, serverNow, now } = f;
+    const { room, game, view, you, serverNow, now } = f;
     this.you = you;
     this.layout(game);
 
@@ -261,7 +349,11 @@ export class Stage {
     let highlightYou = 0;
     if (room.phase === 'countdown') highlightYou = 1;
     else if (room.phase === 'playing' && room.startsAt !== null) highlightYou = Math.max(0, 1 - (serverNow - room.startsAt) / 1500);
-    this.renderer.draw(game, labels, now, { highlightYou });
+    if (view.paints.length && room.phase === 'playing') {
+      const mySlot = game.players.find((p) => p.id === you)?.slot ?? -1;
+      this.onPredictedPaints(game, view.paints, mySlot, now);
+    }
+    this.renderer.draw(view.game, labels, now, { highlightYou, pos: view.pos });
 
     // 计时
     let remain = Math.round(((game.endTick - game.tick) * TICK_MS) / 1000);

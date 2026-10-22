@@ -1,19 +1,11 @@
-// Canvas 2D 棋盘渲染。逻辑位置按格跳变，画面在"上一格 → 当前格"之间补间，转向不会突兀折线。
+// Canvas 2D 棋盘渲染。角色的连续显示位置由 motion.ts 按 tick 时间算好传进来
+// （其他人：插值；自己：预测），渲染器只负责画。
 // 特效（染色弹出、粒子、冲刺拖影）只存在于渲染层，不影响任何游戏状态。
 
 import { DASH_COOLDOWN_TICKS, PALETTE, type Shape } from '@turf/shared/constants';
 import type { PState } from '@turf/shared/protocol';
 import { REDUCED_MOTION } from './fx';
 import type { ClientGame } from './sync';
-
-interface Tween {
-  fx: number;
-  fy: number;
-  tx: number;
-  ty: number;
-  t0: number;
-  dur: number;
-}
 
 export interface PlayerLabel {
   name: string;
@@ -25,6 +17,8 @@ export interface PlayerLabel {
 export interface DrawOpts {
   /** 0..1：在自己身上画"你在这里"脉冲光圈的强度（倒计时和开局时） */
   highlightYou: number;
+  /** 每名玩家的连续显示位置（格坐标）；缺省时画在逻辑格上 */
+  pos: ReadonlyMap<string, { x: number; y: number }>;
 }
 
 interface Particle {
@@ -114,7 +108,6 @@ export class BoardRenderer {
   private gw = 32;
   private gh = 20;
   private dpr = 1;
-  private tweens = new Map<string, Tween>();
   private paintedAt = new Float64Array(0);
   private particles: Particle[] = [];
   private ghosts = new Map<string, Ghost[]>();
@@ -195,30 +188,8 @@ export class BoardRenderer {
     });
   }
 
-  /** 每次收到权威玩家状态时调用，更新补间目标 */
-  onPlayers(players: readonly PState[], now: number): void {
-    for (const p of players) {
-      const tw = this.tweens.get(p.id);
-      if (!tw) {
-        this.tweens.set(p.id, { fx: p.x, fy: p.y, tx: p.x, ty: p.y, t0: now, dur: 1 });
-        continue;
-      }
-      if (p.x === tw.tx && p.y === tw.ty) continue;
-      const cur = this.pos(tw, now);
-      // 距离过大（快照纠正、重连）直接跳过去，不做长距离滑动
-      const far = Math.abs(p.x - cur.x) + Math.abs(p.y - cur.y) > 2.5;
-      tw.fx = far ? p.x : cur.x;
-      tw.fy = far ? p.y : cur.y;
-      tw.tx = p.x;
-      tw.ty = p.y;
-      tw.t0 = now;
-      tw.dur = p.dashLeft > 0 ? 50 : 150;
-    }
-  }
-
-  /** 新一局或重连：清空补间与特效 */
+  /** 新一局：清空特效 */
   reset(): void {
-    this.tweens.clear();
     this.particles = [];
     this.ghosts.clear();
     this.paintedAt.fill(0);
@@ -251,11 +222,6 @@ export class BoardRenderer {
         color,
       });
     }
-  }
-
-  private pos(tw: Tween, now: number): { x: number; y: number } {
-    const k = Math.min(1, Math.max(0, (now - tw.t0) / tw.dur));
-    return { x: tw.fx + (tw.tx - tw.fx) * k, y: tw.fy + (tw.ty - tw.fy) * k };
   }
 
   draw(game: ClientGame, labels: ReadonlyMap<string, PlayerLabel>, now: number, opts: DrawOpts): void {
@@ -326,8 +292,7 @@ export class BoardRenderer {
     for (const p of game.players) {
       const label = labels.get(p.id);
       if (label?.left) continue;
-      const tw = this.tweens.get(p.id);
-      const pos = tw ? this.pos(tw, now) : { x: p.x, y: p.y };
+      const pos = opts.pos.get(p.id) ?? { x: p.x, y: p.y };
       let list = this.ghosts.get(p.id);
       if (p.dashLeft > 0 && !REDUCED_MOTION) {
         if (!list) this.ghosts.set(p.id, (list = []));
@@ -374,8 +339,7 @@ export class BoardRenderer {
     for (const p of order) {
       const label = labels.get(p.id);
       if (label?.left) continue;
-      const tw = this.tweens.get(p.id);
-      const pos = tw ? this.pos(tw, now) : { x: p.x, y: p.y };
+      const pos = opts.pos.get(p.id) ?? { x: p.x, y: p.y };
       if (label?.you && opts.highlightYou > 0) this.drawYouRing(pos.x, pos.y, now, opts.highlightYou, p.slot);
       this.drawPlayer(p, pos.x, pos.y, label);
     }

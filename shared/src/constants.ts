@@ -34,6 +34,8 @@ export const EMPTY_ROOM_TTL_MS = 5 * 60_000;
 export const CHECKSUM_EVERY = 20; // 每 20 tick 附带一次全图校验和
 export const MAX_INPUTS_PER_TICK = 4;
 export const MAX_INPUT_QUEUE = 8;
+/** 输入可以预约的最远 tick：next + 10（500ms）。更远的会被钳回来，防止"预约未来"刷队列 */
+export const MAX_INPUT_LEAD_TICKS = 10;
 export const MAX_MSG_BYTES = 1024;
 export const RATE_PER_SEC = 20;
 export const RATE_BURST = 40;
