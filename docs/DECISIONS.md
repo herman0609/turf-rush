@@ -376,9 +376,9 @@ services:
 - `TRUST_PROXY=1`：Render 前面有代理，需要用 `X-Forwarded-For` 才能识别客户端 IP，否则按 IP 限流和连接数限制会把所有人当成同一个 IP。
 
 **流程**（实际执行）：
-1. 用你提供的 GitHub token 创建私有仓库并推送代码。
+1. 用你提供的 GitHub token 创建仓库并推送代码。Render 无法拉取私有仓库（工作区还没有连接 GitHub），于是按你的选择把仓库改为 public。
 2. 你提供了 Render API Key，所以直接通过 Render API 创建 Web Service（参数与 `render.yaml` 一致），不需要你手动操作 Blueprint。`render.yaml` 仍然保留在仓库里，任何人都可以用 New → Blueprint 一键复现。
-3. 之后每次推送到 `main` 分支，Render 都会自动部署。
+3. **自动部署没有生效**：服务是用公开仓库 URL 创建的，没有安装 Render 的 GitHub App，Render 收不到推送事件，所以 `autoDeployTrigger: commit` 实际不起作用。M4 推送后等了 10 分钟，线上仍然是旧版本，这一点是在对线上跑冒烟测试前、检查部署状态时发现的。现在的做法是：推送后调用 `POST /v1/services/{id}/deploys`，并指定 commitId 触发部署；等部署状态变为 live、确认线上页面引用的是新构建产物之后，再跑 `SIM_URL=… npm run sim`。如果想恢复"推送即部署"，有两种办法：在 Render 控制台连接 GitHub 账号，或者把服务的 Deploy Hook URL 配进 CI。
 
 **时间安排**：原计划第一次部署放在 M1 结束时（见 D-15）。实际上 M1 结束时还没拿到凭证，所以推迟到 M3 之后；平台相关的风险（wss、代理、端口、冷启动）在这一步集中验证。
 
@@ -400,7 +400,7 @@ services:
 - 重点覆盖竞态场景：倒计时中房主掉线、结算时用 token 重连、同一 token 同时建立两个连接、宽限期恰好在阶段切换的瞬间到期。
 
 **回归脚本** `npm run sim`：
-1. 在随机端口启动真实服务端。为了让回归跑得快，默认一局 15 秒（通过环境变量 `MATCH_SECONDS` 调整，生产环境固定为 60 秒）；加上 `--full` 可以跑完整的 60 秒。
+1. 在随机端口启动真实服务端。为了让回归跑得快，默认一局 5 秒、跑 2 局（用环境变量 `SIM_SECONDS` 和 `SIM_ROUNDS` 调整，例如 `SIM_SECONDS=60` 跑完整时长；生产环境固定为 60 秒）。
 2. 机器人 A 通过 HTTP 建房，机器人 B 按房间码加入。
 3. 两人准备，A 开始。
 4. 对局中两个机器人随机转向、冲刺，并故意发送重复和过期的 seq。
@@ -417,7 +417,7 @@ M2 在同一个脚本里加入了生命周期场景，按顺序执行：对局�
 
 设置环境变量 `SIM_URL=https://…` 后，sim 会直接对线上部署做冒烟测试（远程模式按线上的 60 秒对局等待结算）。`scripts/bots.ts` 则用 `--url` 参数指定地址。
 
-**持续集成**（M5）：添加 GitHub Actions，在每次推送时运行 `npm run verify`。
+**持续集成**（M5）：GitHub Actions 配置已经写好，每次推送到 main 和每个 PR 都会在 Node 22 上运行 `npm ci && npm run verify`。但目前用于推送的 token 只有 `repo` 权限，GitHub 不允许没有 `workflow` 权限的 token 创建 `.github/workflows/` 下的文件，所以这份配置还没有进入仓库。换一个带 `workflow` 权限的 token 后即可推送，也可以直接在 GitHub 网页上新建该文件。
 
 **日志**：服务端对房间事件输出单行 JSON 日志，包括建房、加入、离开、断线、重连、阶段切换和结算，方便在 Render 控制台中排查问题。
 
