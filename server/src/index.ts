@@ -16,7 +16,27 @@ const app = createApp({
   log: jsonLogger,
 });
 
-const port = await app.listen();
+let port: number;
+try {
+  port = await app.listen();
+} catch (err) {
+  // 给验收者看的提示：中英双语（中文版 Windows 的命令行默认不是 UTF-8，中文可能显示为乱码）
+  const code = (err as NodeJS.ErrnoException).code;
+  const want = process.env.PORT ?? '8080';
+  if (code === 'EADDRINUSE') {
+    console.error(
+      `\n端口 ${want} 已被占用。请换一个端口启动，例如：\n` +
+        `  macOS / Linux：PORT=8081 ./start.sh   （源码目录下：PORT=8081 npm start）\n` +
+        `  Windows：set PORT=8081 后再运行 start.bat\n` +
+        `Port ${want} is already in use. Start on another port, e.g. PORT=8081 ./start.sh (Windows: set PORT=8081, then start.bat)\n`,
+    );
+  } else if (code === 'EACCES') {
+    console.error(`\n没有权限监听端口 ${want}，请改用 1024 以上的端口，例如 PORT=8081。\nPermission denied for port ${want}; use a port above 1024, e.g. PORT=8081.\n`);
+  } else {
+    console.error('启动失败 / failed to start:', err);
+  }
+  process.exit(1);
+}
 jsonLogger('listen', { port, staticDir, url: `http://localhost:${port}` });
 
 let stopping = false;

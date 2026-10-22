@@ -184,9 +184,13 @@ export function createApp(opts: AppOptions = {}): App {
   return {
     server,
     manager,
+    // 监听失败（端口被占用、无权限）时 reject，交给调用方给出可读的提示，而不是抛出未处理的 'error' 事件
     listen: () =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
+        const onError = (err: Error) => reject(err);
+        server.once('error', onError);
         server.listen(opts.port ?? 8080, opts.host, () => {
+          server.off('error', onError);
           manager.start();
           resolve((server.address() as AddressInfo).port);
         });

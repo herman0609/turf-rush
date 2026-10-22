@@ -4,7 +4,7 @@
 
 **在线地址：<https://turf-rush-gw9p.onrender.com>**
 
-代码仓库：<https://github.com/herman0609/turf-rush> · 设计方案与取舍记录：[docs/DECISIONS.md](docs/DECISIONS.md)
+代码仓库：<https://github.com/herman0609/turf-rush> · 全部功能与验证方法：[docs/功能说明.md](docs/功能说明.md) · 设计方案与取舍记录：[docs/DECISIONS.md](docs/DECISIONS.md)
 
 <p>
   <img src="docs/screenshots/03-lobby.png" width="32%" alt="大厅：房间码、邀请链接、玩家与准备状态">
@@ -70,13 +70,32 @@
 用机器人凑人数。它们走的是和真人完全相同的公开协议：会自动准备、在对局中移动和冲刺、结算后自动再来一局，按 Ctrl+C 退出时会主动离开房间。
 
 ```bash
+# 用免安装运行包（见下文"运行方式"），不需要 npm install：
+node tools/bots.js 房间码 3                                          # 对本机 8080 端口的服务
+node tools/bots.js 房间码 3 --url https://turf-rush-gw9p.onrender.com  # 对线上地址
+
+# 或者在源码目录：
 npm install
-npm run bots -- 房间码 3 --url https://turf-rush-gw9p.onrender.com   # 加入 3 个机器人，凑满 4 人局
+npm run bots -- 房间码 3 --url https://turf-rush-gw9p.onrender.com
 ```
 
-## 本地运行
+房间码在大厅页顶部。机器人需要在房主点击「开始游戏」之前加入。
 
-需要 Node.js 20.19 或更高版本（推荐 22）。
+## 运行方式
+
+**1. 在线地址**：直接打开 <https://turf-rush-gw9p.onrender.com>，什么都不用装。
+
+**2. 免安装运行包**：适合线上地址打不开，或者希望在本机或局域网里验收的情况。提交的压缩包中 `app/` 目录就是运行包，也可以在源码目录运行 `npm run package` 生成到 `release/turf-rush-app/`。只需要 **Node.js 18 或更高版本**（已实测 18.20、20.20、22），不需要 `npm install`，也不需要联网。
+
+```bash
+cd app                       # 或 release/turf-rush-app
+./start.sh                   # macOS / Linux；Windows 双击 start.bat；macOS 也可以双击 start.command
+                             # 任何系统都可以直接运行：node server/dist/index.js
+# 打开 http://localhost:8080 ，开两个普通标签页就是两名玩家
+node tools/sim.js            # 可选：回归测试，自带一个临时服务，约 20 秒，最后一行显示"✅ 回归测试通过"
+```
+
+**3. 从源码运行**：需要 **Node.js 20.19 或更高版本**（Vite 8 的要求，推荐 22）。
 
 ```bash
 npm install
@@ -84,6 +103,8 @@ npm start          # 构建前后端，并在 http://localhost:8080 同时提供
 ```
 
 开发模式下运行 `npm run dev`：服务端用 tsx watch 启动在 8080 端口，前端用 Vite 启动在 <http://localhost:5173>，`/api` 和 `/ws` 会被代理到服务端。
+
+**局域网联机**：服务端监听所有网卡，同一 Wi-Fi 下的手机或其他电脑打开 `http://<本机IP>:8080` 就能加入。在大厅里复制的邀请链接用的是当前地址栏里的域名，所以要先用本机 IP 打开页面，再复制邀请链接发给别人。本机 IP 可以在 macOS 的"系统设置 → 网络"里查看，Windows 用 `ipconfig` 查看。第一次运行时，系统防火墙可能会询问是否允许 node 接受传入连接，请选择允许。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
@@ -93,15 +114,30 @@ npm start          # 构建前后端，并在 http://localhost:8080 同时提供
 | `ALLOWED_ORIGINS` | 空 | WebSocket 允许的额外 Origin，用逗号分隔；同源请求始终允许 |
 | `NODE_ENV` | 未设置 | 设为 `production` 时，静态文件的元数据只在启动时读取一次；不设置时每次请求都重新读取，方便本地只重新构建、不重启服务 |
 
+## 常见问题
+
+| 现象 | 解决办法 |
+|---|---|
+| 在线地址打开很慢，或者先出现 Render 的加载页 | 免费实例休眠后冷启动约需 1 分钟，等待即可；也可以改用免安装运行包 |
+| 启动时提示"端口 8080 已被占用" | 换一个端口：`PORT=8081 ./start.sh`（源码目录下 `PORT=8081 npm start`）；Windows 先执行 `set PORT=8081`，再运行 `start.bat` |
+| `./start.sh` 提示 Permission denied | 解压工具丢失了可执行权限，改用 `sh start.sh` |
+| macOS 双击 `start.command` 时提示"无法验证开发者" | 右键点击文件，选择"打开"；或者在终端中运行 `./start.sh` |
+| 提示找不到 node，或 `node -v` 低于要求 | 到 <https://nodejs.org> 安装 LTS 版本。运行包需要 18 或更高，源码构建需要 20.19 或更高 |
+| 两个标签页被识别成同一个人，有一个被顶替 | 用的是"复制标签页"，它会连同 sessionStorage 一起复制。请用普通的新标签页打开邀请链接 |
+| 没有声音 | 浏览器要求先和页面交互一次，所以点一下或按一个键之后才会出声；另外检查右上角的喇叭图标是否处于静音，按 M 可以切换 |
+| 局域网里的其他设备打不开页面 | 确认两台设备在同一网络，并且用本机 IP 而不是 localhost 打开；检查系统防火墙是否允许 node |
+| 页面显示"服务器刚刚重启 · 房间已失效" | 服务重启或重新部署后，内存里的房间会丢失，属于预期行为，重新创建房间即可 |
+
 ## 测试
 
 | 命令 | 内容 |
 |---|---|
-| `npm test` | 99 个单元测试和集成测试：规则引擎的确定性、协议 schema、房间状态机与生命周期、预测与目标 tick、乱序重排，以及真实 HTTP / WebSocket 下的安全和异常处理 |
+| `npm test` | 100 个单元测试和集成测试：规则引擎的确定性、协议 schema、房间状态机与生命周期、预测与目标 tick、乱序重排，以及真实 HTTP / WebSocket 下的安全和异常处理 |
 | `npm run typecheck` | 对 shared、server、client、scripts 四个部分做类型检查 |
 | `npm run sim` | 回归脚本：启动真实服务端，由机器人甲、乙通过 WebSocket 完整跑完两局，过程中覆盖作弊和重复输入、断线后用 token 重连、中途观战、观战者补位和房主移交，最后断言所有端的结算结果一致、各自重建的地图校验和与服务端一致，且没有 tick 缺口 |
 | `npm run verify` | 依次执行以上全部步骤，再加上构建 |
 | `SIM_URL=https://turf-rush-gw9p.onrender.com npm run sim` | 对线上部署跑同一套回归，作为冒烟测试；远程模式按线上的 60 秒对局等待，大约需要 2 分半 |
+| `npm run package` | 构建并生成免安装运行包 `release/turf-rush-app/`（服务端、前端、`tools/bots.js`、`tools/sim.js` 和启动脚本） |
 
 ## 架构速览
 
@@ -109,7 +145,7 @@ npm start          # 构建前后端，并在 http://localhost:8080 同时提供
 shared/   协议类型、zod 校验、确定性规则引擎 step(state, inputs)（服务端模拟和客户端预测共用同一份）
 server/   Node + ws：HTTP 静态资源、/api、/ws 共用一个端口；房间状态机、20 Hz tick、输入校验与限流
 client/   Vite + Canvas 2D，不使用 UI 框架：同步核心、插值与预测、渲染、HUD、WebAudio 合成音效
-scripts/  sim-match.ts（回归测试）、bots.ts（机器人）
+scripts/  sim-match.ts（回归测试）、bots.ts（机器人）、package.mjs（生成免安装运行包）
 ```
 
 - **服务端权威**：服务端以固定 20 Hz 推进模拟。客户端只发送 `{seq, tick?, dir | dash}` 形式的输入，不能上报位置、分数或结果。每条消息都经过 schema 校验，单条消息不超过 1 KB，每个连接每秒最多 20 条；seq 必须单调递增，重复或过期的输入会被丢弃并计数。

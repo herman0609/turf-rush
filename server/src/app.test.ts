@@ -90,6 +90,12 @@ describe('HTTP 接口', () => {
     expect(h.headers.get('content-security-policy')).toContain("default-src 'self'");
     expect(h.headers.get('x-content-type-options')).toBe('nosniff');
   });
+
+  it('端口被占用时 listen() 以 EADDRINUSE 拒绝，而不是抛出未处理异常', async () => {
+    const port = Number(new URL(base).port);
+    const other = createApp({ port, host: '127.0.0.1', staticDir: null, log: silentLogger });
+    await expect(other.listen()).rejects.toMatchObject({ code: 'EADDRINUSE' });
+  });
 });
 
 describe('WebSocket 安全', () => {
