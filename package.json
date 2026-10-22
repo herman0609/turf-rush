@@ -1,0 +1,38 @@
+{
+  "name": "turf-rush",
+  "version": "0.1.0",
+  "private": true,
+  "description": "60 秒抢地盘：浏览器实时联机小游戏（2–4 人）",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run dev -w @turf/server",
+    "dev:client": "npm run dev -w @turf/client",
+    "build": "npm run build -w @turf/client && npm run build -w @turf/server",
+    "start": "npm run build && npm run serve",
+    "serve": "node server/dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p shared && tsc -p server && tsc -p client && tsc -p scripts",
+    "sim": "tsx scripts/sim-match.ts",
+    "verify": "npm run typecheck && npm run test && npm run build && npm run sim"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "concurrently": "^10.0.6",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "ws": "^8.22.0"
+  }
+}

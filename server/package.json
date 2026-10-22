@@ -1,0 +1,15 @@
+{
+  "name": "@turf/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@turf/shared": "*",
+    "sirv": "^3.0.2",
+    "ws": "^8.22.0"
+  }
+}

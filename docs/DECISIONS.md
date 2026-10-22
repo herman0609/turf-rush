@@ -129,7 +129,7 @@ docs/DECISIONS.md  README.md  render.yaml
 | `ready` | `ready: boolean` | 仅玩家，且仅在 lobby 阶段 |
 | `start` | — | 仅房主，且仅在 lobby 阶段，需满足开始条件 |
 | `input` | `seq, tick?, dir?: 'U'\|'D'\|'L'\|'R', dash?: true` | `dir` 和 `dash` 至少有一个；`seq` 必须大于本连接上次处理的值；`tick` 是目标 tick，M4 启用（见 D-08）|
-| `rematch` | — | 仅在 result 阶段，仅玩家 |
+| `rematch` | — | 仅在 result 阶段有效（任何成员都可触发，回到大厅本身无害）；已回到大厅时重复发送直接忽略 |
 | `leave` | — | 主动离开 |
 | `ping` | `c` | 客户端发送时刻（单调时钟） |
 | `resync` | — | 请求全量快照，每秒最多 1 次 |
@@ -140,7 +140,7 @@ docs/DECISIONS.md  README.md  render.yaml
 |---|---|---|
 | `welcome` | `you, token, role: 'player'\|'spectator'` | join 成功 |
 | `snapshot` | `round, tick, room: RoomView, game: GameView \| null` | join / 重连 / resync / 进入倒计时 |
-| `room` | `rev, room: RoomView` | 房间元数据有任何变化时，整体下发（数据量很小） |
+| `room` | `room: RoomView`（`room.rev` 为单调递增版本号） | 房间元数据有任何变化时，整体下发（数据量很小）；客户端丢弃 `rev` 不大于当前值的消息 |
 | `tick` | `round, tick, players: PState[], cells: number[], scores: number[], sum?` | playing 阶段每个 tick 发送；`cells` 是扁平数组 `[idx, owner, ...]`，只含变化的格子；`sum` 每 20 tick 附带一次 |
 | `pong` | `c, s, dropped` | `s` 是服务端时间，`dropped` 是本连接累计被丢弃的输入数 |
 | `error` | `code, msg` | 见下文错误码 |
@@ -148,13 +148,13 @@ docs/DECISIONS.md  README.md  render.yaml
 数据结构如下：
 
 ```ts
-RoomView  = { code, phase: 'lobby'|'countdown'|'playing'|'result', hostId,
-              round, startsAt?, endsAt?, members: Member[], lastResult?: Result }
+RoomView  = { code, rev, phase: 'lobby'|'countdown'|'playing'|'result', hostId,
+              round, startsAt, endsAt, members: Member[], lastResult: Result | null }
 Member    = { id, name, role: 'player'|'spectator', slot: number|null,
               ready, online, offlineUntil: number|null, left: boolean }
 GameView  = { w, h, cells: number[] /* 每格存 owner 的 slot，空格为 -1 */, players: PState[], scores }
-PState    = { id, slot, x, y, dir, moving, dashLeft, cdLeft, ack /* 最后处理的 seq */ }
-Result    = { reason: 'time'|'opponents_offline'|'opponents_left',
+PState    = { id, slot, x, y, dir, moving, dashLeft, cdLeft, frozen, ack /* 最后处理的 seq */ }
+Result    = { round, reason: 'time'|'opponents_offline'|'opponents_left',
               ranking: { id, name, slot, score, left }[], winners: id[], sum }
 ```
 
@@ -195,7 +195,7 @@ Result    = { reason: 'time'|'opponents_offline'|'opponents_left',
 
 ### 5.1 权威与时间
 
-服务端是唯一权威。服务端用固定步长循环推进模拟：以 `performance.now()` 作为累加器，单次最多追 3 个 tick，超出部分丢弃并记录日志。这样即使 Render 免费实例只有 0.1 CPU，计时器偶尔抖动，tick 节奏也不会长期漂移。每个 tick 的流程是：取出各玩家缓冲的输入，调用 `step(state, inputs)`，算出变化的格子，然后广播。
+服务端是唯一权威。服务端用固定步长推进模拟：目标 tick = `floor((now − startsAt) / 50ms)`，主循环用 `setTimeout` 精确对齐到下一个 tick 的时间点，单次最多追 4 个 tick。如果落后更多（进程被长时间阻塞），不再追赶，而是把 `startsAt / endsAt` 整体后移并广播，保证所有人看到的剩余时间仍然一致，同时记录 `tick_overrun` 日志。这样即使 Render 免费实例只有 0.1 CPU、计时器偶尔抖动，tick 节奏也不会长期漂移。每个 tick 的流程是：取出各玩家缓冲的输入，调用 `step(state, inputs)`，算出变化的格子，然后广播。
 
 客户端只发送输入，从不上报位置、分数或结果。玩家身份绑定在连接上，消息里没有"我是谁"这个字段，所以无法替别人操作。
 
@@ -283,7 +283,7 @@ lobby ──房主开始（≥2 名玩家，且全部在线、已准备）──
 
 - 进入倒计时时，服务端创建初始 GameView，并通过快照下发，客户端立刻能看到出生位置。
 - 结算后的房间会一直停在 result 阶段，直到有人点「再来一局」，或者房间被清空。
-- Room 的所有状态变更都在一个同步方法里完成。所有定时器（宽限期、倒计时、单人检测、空房清理）都由 Room 统一持有：阶段切换时统一清理，定时器触发时会再确认一次当前状态，避免竞态。
+- Room 的所有状态变更都在同步方法里完成，并且 **Room 内部没有任何定时器**：倒计时结束、tick 推进、30 秒宽限期、单人检测都在 `update(now)` 中按时间戳判定，由 RoomManager 的主循环驱动。这样不存在"定时器触发时状态已经变了"的竞态，单元测试也可以直接传入假时间，不依赖真实计时。代价是单人检测等逻辑有不超过 1 个 tick（50 ms）的误差。
 
 ### 6.2 生命周期事件
 
