@@ -1,0 +1,19 @@
+# GitHub Actions：每次推送和 PR 都跑完整校验（类型检查 + 单测 + 构建 + 两机器人回归）
+# 移动到 .github/workflows/verify.yml 即可启用（当前推送用的 token 没有 workflow 权限，暂存于此）。
+name: verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
