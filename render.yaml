@@ -1,0 +1,21 @@
+# Render Blueprint：单个免费 Web Service（新加坡），同一端口提供静态页面与 WebSocket。
+# 房间只在内存里：免费实例单实例运行，重启/部署后房间失效（见 README 与 docs/DECISIONS.md 第 8 节）。
+services:
+  - type: web
+    runtime: node
+    name: turf-rush
+    region: singapore
+    plan: free
+    # 设置了 NODE_ENV=production 后 npm ci 默认跳过 devDependencies，构建需要 vite/esbuild，所以显式带上
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server/dist/index.js
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render 前面有代理：用 X-Forwarded-For 识别客户端 IP（按 IP 限流、限连接数）
+      - key: TRUST_PROXY
+        value: "1"
+      - key: MATCH_SECONDS
+        value: "60"

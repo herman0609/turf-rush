@@ -350,7 +350,7 @@ lobby ──房主开始（≥2 名玩家，且全部在线、已准备）──
 | 冷启动约 1 分钟 | README 提醒验收者"首次打开可能需要等待约 1 分钟"。评审前由我们手动预热一次；如有需要，可以在评审窗口期用外部定时 ping 保活，单个服务全月运行约 744 小时，在 750 小时额度之内 |
 | 0.1 CPU | 固定步长循环带追赶上限；每个 tick 的工作量很小；`/healthz` 暴露 `tickLagMs`，用于观察 |
 
-**Blueprint 配置**（`render.yaml`，字段依据官方规范 [3]）：
+**Blueprint 配置**（仓库根目录的 `render.yaml`，字段依据官方规范 [3]）：
 
 ```yaml
 services:
@@ -359,18 +359,26 @@ services:
     name: turf-rush
     region: singapore
     plan: free
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node server/dist/index.js
     healthCheckPath: /healthz
     autoDeployTrigger: commit
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: TRUST_PROXY, value: "1" }
+      - { key: MATCH_SECONDS, value: "60" }
 ```
 
-**流程**：
-1. 我使用你提供的 GitHub token 创建仓库并推送代码。
-2. 你在 Render 控制台中点一次 New → Blueprint，选择这个仓库。这一步需要你本人登录 Render 并授权 GitHub App。我可以先把页面打开到这一步，再交给你接管登录。
+两处与最初方案不同：
+- 构建命令带 `--include=dev`。设置了 `NODE_ENV=production` 之后，`npm ci` 默认会跳过 devDependencies，而构建需要 vite 和 esbuild。之所以设置 `NODE_ENV=production`，是为了让 sirv 在启动时缓存文件元数据（见 D-27）。
+- `TRUST_PROXY=1`：Render 前面有代理，需要用 `X-Forwarded-For` 才能识别客户端 IP，否则按 IP 限流和连接数限制会把所有人当成同一个 IP。
+
+**流程**（实际执行）：
+1. 用你提供的 GitHub token 创建私有仓库并推送代码。
+2. 你提供了 Render API Key，所以直接通过 Render API 创建 Web Service（参数与 `render.yaml` 一致），不需要你手动操作 Blueprint。`render.yaml` 仍然保留在仓库里，任何人都可以用 New → Blueprint 一键复现。
 3. 之后每次推送到 `main` 分支，Render 都会自动部署。
 
-**时间安排**：第一次部署放在 M1 结束时（见 D-15）。
+**时间安排**：原计划第一次部署放在 M1 结束时（见 D-15）。实际上 M1 结束时还没拿到凭证，所以推迟到 M3 之后；平台相关的风险（wss、代理、端口、冷启动）在这一步集中验证。
 
 ---
 
